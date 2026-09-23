@@ -36,3 +36,13 @@
 ## 사용 범위
 
 이 시스템은 실내 안전 모니터링을 돕기 위한 교육·연구용 프로토타입입니다. 의료적 판단이나 응급기관 신고를 대신하지 않으며, 실제 긴급구조 체계와의 연계는 향후 검토 범위입니다.
+
+
+## 프로젝트 문서
+
+- [전체 문서 목록](docs/README.md)
+- [프로젝트 계획](docs/PROJECT_PLAN.md)
+- [요구사항](docs/REQUIREMENTS.md)
+- [시스템 구성](docs/ARCHITECTURE.md)
+- [장비 및 개발 환경](docs/HARDWARE.md)
+- [테스트 계획](docs/TEST_PLAN.md)

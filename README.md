@@ -31,7 +31,56 @@
 
 ## 진행 상태
 
-이 README는 프로젝트 계획서를 바탕으로 작성했습니다. 기능별 구현, 설치·실행 방법, 테스트 결과는 개발이 진행되면 실제 상태에 맞게 추가합니다.
+전체 흐름을 잇는 시험 구현이 있습니다. 장비 없이 가상 사람·가상 음성으로 동작을 확인할 수 있으며, 실제 카메라·마이크와 Raspberry Pi에서의 동작과 성능은 아직 검증하지 않았습니다. 판정 임계값과 대기 시간은 시험용 초기값([config.py](config.py))입니다.
+
+## 코드 구조
+
+| 경로 | 역할 |
+| --- | --- |
+| `l3_perception/` | 카메라 입력, 자세 추정(MediaPipe·YOLO 후보), 특징 계산, 낙상 의심 판정 |
+| `l4_application/` | 음성 확인, 이벤트 기록(SQLite), 알림(텔레그램 시험 구현), 현장 화면, 로컬 API |
+| `l2_system/` | Raspberry Pi systemd 서비스 파일 |
+| `run_demo.py` | 장비 없이 전체 흐름을 확인하는 데모 |
+| `tests/` | 단위 테스트 |
+
+L3(감지)와 L4(응용)는 별도 프로세스이며 `127.0.0.1` 로컬 API로 통신합니다. L3는 낙상 의심까지만 판단해 보고하고, 음성 확인·경보·해제는 L4가 관리합니다. L4가 이벤트를 끝내면 L3는 하트비트 응답으로 이를 확인하고 감시를 재개합니다.
+
+## 실행 방법
+
+Python 3.10 이상에서 저장소 최상위 폴더 기준으로 실행합니다.
+
+```bash
+python -m venv .venv
+pip install -r requirements.txt
+```
+
+단위 테스트:
+
+```bash
+python -m unittest discover tests
+```
+
+장비 없이 데모 실행 후 브라우저에서 `http://127.0.0.1:5000` 확인:
+
+```bash
+python run_demo.py
+```
+
+주요 시나리오(앉기·비틀거림·낙상 후 응답/무응답/버튼 해제/재감지) 자동 확인:
+
+```bash
+python run_demo.py --auto
+```
+
+실제 장치에서는 L4 서버와 L3 감지 프로세스를 각각 실행합니다. 자세 추정 모델(`mediapipe` 또는 `ultralytics`), 음성 인식(`vosk`, `sounddevice`)과 Vosk 한국어 모델(`data/vosk-model-small-ko`), 안내 음성 파일(`assets/audio/ask_status.wav`)이 필요합니다. 알림을 보내려면 `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` 환경변수를 설정합니다. 설정하지 않으면 알림을 보내지 않고 화면에 '알림 미설정'으로 표시합니다.
+
+```bash
+python -m l4_application.server
+```
+
+```bash
+python -m l3_perception.fall_detector
+```
 
 ## 사용 범위
 

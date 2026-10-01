@@ -1,0 +1,14 @@
+# 공통 (L4 서버, 데모, 테스트)
+numpy>=1.24
+flask>=3.0
+requests>=2.31
+
+# L3 실제 카메라 감지 (Raspberry Pi)
+opencv-python-headless>=4.8
+# 자세 추정 모델은 비교 시험 중이므로 사용할 것만 설치한다.
+# mediapipe>=0.10     # config.POSE_MODEL = "mediapipe"
+# ultralytics>=8.1    # config.POSE_MODEL = "yolo" (AGPL-3.0)
+
+# L4 음성 확인 (Raspberry Pi)
+# vosk>=0.3.45
+# sounddevice>=0.4.6

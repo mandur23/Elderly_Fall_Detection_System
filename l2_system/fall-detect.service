@@ -1,0 +1,17 @@
+[Unit]
+Description=Fall detection L3 - camera, pose estimation, fall suspicion
+After=fall-app.service
+Wants=fall-app.service
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi/fall-detect-system
+EnvironmentFile=-/home/pi/fall-detect-system/.env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/home/pi/fall-detect-system/.venv/bin/python -m l3_perception.fall_detector
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

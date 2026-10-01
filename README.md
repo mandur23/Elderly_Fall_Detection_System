@@ -31,15 +31,16 @@
 
 ## 진행 상태
 
-전체 흐름을 잇는 시험 구현이 있습니다. 장비 없이 가상 사람·가상 음성으로 동작을 확인할 수 있으며, 실제 카메라·마이크와 Raspberry Pi에서의 동작과 성능은 아직 검증하지 않았습니다. 판정 임계값과 대기 시간은 시험용 초기값([config.py](config.py))입니다.
+전체 흐름을 잇는 구현과 Raspberry Pi 설치·운영 도구가 있습니다. 장비 없이 가상 사람·가상 음성으로 전체 흐름을 확인했고, 실제 MediaPipe 자세 모델로 특징 계산과 영상 평가 도구가 동작하는 것을 PC에서 확인했습니다. Raspberry Pi 실기기, 실제 마이크·음성 인식, 실제 낙상 영상에서의 성능은 아직 검증하지 않았습니다. 판정 임계값과 대기 시간은 시험용 초기값([config.py](config.py))입니다.
 
 ## 코드 구조
 
 | 경로 | 역할 |
 | --- | --- |
-| `l3_perception/` | 카메라 입력, 자세 추정(MediaPipe·YOLO 후보), 특징 계산, 낙상 의심 판정 |
+| `l3_perception/` | 카메라 입력(Pi 카메라·USB), 자세 추정(MediaPipe·YOLO 후보), 특징 계산, 낙상 의심 판정 |
 | `l4_application/` | 음성 확인, 이벤트 기록(SQLite), 알림(텔레그램 시험 구현), 현장 화면, 로컬 API |
-| `l2_system/` | Raspberry Pi systemd 서비스 파일 |
+| `l2_system/` | Raspberry Pi 설치 스크립트, 서비스 파일, 설정 예시 |
+| `tools/` | 장치 점검, 영상 평가, 소리 파일 생성 |
 | `run_demo.py` | 장비 없이 전체 흐름을 확인하는 데모 |
 | `tests/` | 단위 테스트 |
 
@@ -72,15 +73,21 @@ python run_demo.py
 python run_demo.py --auto
 ```
 
-실제 장치에서는 L4 서버와 L3 감지 프로세스를 각각 실행합니다. 자세 추정 모델(`mediapipe` 또는 `ultralytics`), 음성 인식(`vosk`, `sounddevice`)과 Vosk 한국어 모델(`data/vosk-model-small-ko`), 안내 음성 파일(`assets/audio/ask_status.wav`)이 필요합니다. 알림을 보내려면 `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` 환경변수를 설정합니다. 설정하지 않으면 알림을 보내지 않고 화면에 '알림 미설정'으로 표시합니다.
+Raspberry Pi 설치, 장치 점검, 서비스 관리는 [설치 및 운영 안내](docs/OPERATIONS.md)를 따릅니다.
 
 ```bash
-python -m l4_application.server
+bash l2_system/setup_pi.sh
 ```
 
+기기별 설정은 `config.local.toml`에 적습니다(예시: `l2_system/config.local.toml.example`). 텔레그램 토큰을 설정하지 않으면 알림을 보내지 않고 화면에 '알림 미설정'으로 표시합니다.
+
+영상 파일로 감지 성능 측정:
+
 ```bash
-python -m l3_perception.fall_detector
+python -m tools.evaluate labels.csv
 ```
+
+상업적 사용 전에 필요한 검증·규제·운영 항목은 [상용화 준비 점검](docs/COMMERCIAL_READINESS.md)에 정리했습니다.
 
 ## 사용 범위
 
@@ -95,3 +102,5 @@ python -m l3_perception.fall_detector
 - [시스템 구성](docs/ARCHITECTURE.md)
 - [장비 및 개발 환경](docs/HARDWARE.md)
 - [테스트 계획](docs/TEST_PLAN.md)
+- [설치 및 운영 안내](docs/OPERATIONS.md)
+- [상용화 준비 점검](docs/COMMERCIAL_READINESS.md)

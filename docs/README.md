@@ -7,3 +7,5 @@
 - [시스템 구성](ARCHITECTURE.md): 처리 흐름과 구성 요소
 - [장비 및 개발 환경](HARDWARE.md): 예정 장비와 구축 순서
 - [테스트 계획](TEST_PLAN.md): 검증 시나리오와 기록 항목
+- [설치 및 운영 안내](OPERATIONS.md): Raspberry Pi 설치, 점검, 서비스 관리, 장애 알림
+- [상용화 준비 점검](COMMERCIAL_READINESS.md): 현재 반영된 것과 상용화 전 필요한 검증·규제·운영 항목

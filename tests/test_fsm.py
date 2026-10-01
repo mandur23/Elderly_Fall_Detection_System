@@ -13,8 +13,17 @@ class FsmTest(unittest.TestCase):
     def setUp(self):
         self.transitions = []
         self.fsm = FallFSM(descent_peak=2.0, t1_lying_seconds=2.0, falling_timeout=5.0,
-                           angle_lying=60, aspect_lying=1.0, angle_standing=40, aspect_standing=0.8,
+                           angle_lying=60, aspect_lying=1.0, angle_standing=40,
                            on_state_change=lambda o, n, f: self.transitions.append(n))
+
+    def test_upright_wide_stance_is_not_lying(self):
+        # 실사진(달리는 자세)에서 측정한 값: 몸통 18도, 종횡비 1.07
+        self.assertFalse(self.fsm.is_lying({"torso_angle": 18.0, "aspect_ratio": 1.07}))
+        self.assertTrue(self.fsm.is_standing({"torso_angle": 18.0, "aspect_ratio": 1.07}))
+        # 같은 사진을 90도 돌린 누운 자세: 몸통 72도, 종횡비 1.0
+        self.assertTrue(self.fsm.is_lying({"torso_angle": 71.6, "aspect_ratio": 1.0}))
+        # 몸통이 45도쯤 기울고 옆으로 넓게 퍼진 자세는 누움으로 본다
+        self.assertTrue(self.fsm.is_lying({"torso_angle": 45.0, "aspect_ratio": 1.4}))
 
     def test_slow_lying_without_peak_stays_normal(self):
         for t in range(10):

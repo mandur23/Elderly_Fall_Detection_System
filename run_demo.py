@@ -37,14 +37,14 @@ def start_system(listen_seconds: float):
     service = build_service(voice_backend="simulated", db_path=DEMO_DB)
     service.listen_seconds = listen_seconds
     service.start()
-    app = create_app(service)
+    app = create_app(service, config.INTERNAL_API_TOKEN)
     threading.Thread(
         target=lambda: app.run(host=config.SERVER_HOST, port=config.SERVER_PORT, threaded=True,
                                use_reloader=False),
         daemon=True,
     ).start()
 
-    pipeline = FallDetectionPipeline(model="mock", use_camera=False)
+    pipeline = FallDetectionPipeline(model="mock", camera=None)
     threading.Thread(target=pipeline.run, daemon=True).start()
     return service, pipeline
 

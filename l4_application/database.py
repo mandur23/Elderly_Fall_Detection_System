@@ -45,6 +45,13 @@ CREATE TABLE IF NOT EXISTS events (
     notified_at TEXT,
     cleared_by TEXT
 );
+CREATE TABLE IF NOT EXISTS system_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    at TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    message TEXT,
+    notify_state TEXT NOT NULL DEFAULT 'none'
+);
 """
 
 
@@ -61,6 +68,9 @@ class Database:
         self._conn.row_factory = sqlite3.Row
         self._lock = threading.Lock()
         with self._lock, self._conn:
+            # WAL: 전원 차단 시 손상 위험을 줄이고 읽기·쓰기가 서로 막지 않게 한다.
+            self._conn.execute("PRAGMA journal_mode=WAL")
+            self._conn.execute("PRAGMA synchronous=NORMAL")
             self._conn.executescript(SCHEMA)
 
     def _execute(self, sql: str, params=()) -> sqlite3.Cursor:
@@ -141,3 +151,20 @@ class Database:
             "ORDER BY id",
             (NOTIFY_FAILED, now_iso()),
         )
+
+    # --- 시스템 이벤트 (장치 이상·복구·일일 보고 기록) ---
+    def insert_system_event(self, kind: str, message: str, notify_state: str = NOTIFY_NONE) -> int:
+        cur = self._execute("INSERT INTO system_events (at, kind, message, notify_state) VALUES (?, ?, ?, ?)",
+                            (now_iso(), kind, message, notify_state))
+        return cur.lastrowid
+
+    def recent_system_events(self, limit: int = 20) -> List[Dict]:
+        return self._query("SELECT * FROM system_events ORDER BY id DESC LIMIT ?", (max(1, min(limit, 200)),))
+
+    def counts_since(self, since_iso: str) -> Dict[str, int]:
+        rows = self._query(
+            "SELECT COUNT(*) AS events, SUM(CASE WHEN result IN (?, ?, ?) THEN 1 ELSE 0 END) AS alarms "
+            "FROM events WHERE started_at >= ?",
+            (*ALERT_RESULTS, since_iso),
+        )
+        return {"events": rows[0]["events"] or 0, "alarms": rows[0]["alarms"] or 0}

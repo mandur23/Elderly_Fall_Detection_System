@@ -1,16 +1,17 @@
+# 사용자 서비스 템플릿. setup_pi.sh가 __INSTALL_DIR__를 바꿔 ~/.config/systemd/user/에 설치한다.
+# 오디오(PipeWire)가 사용자 세션에서 동작하므로 시스템 서비스가 아니라 사용자 서비스로 실행한다.
 [Unit]
 Description=Fall detection L4 - local API, voice check, alerts, kiosk page
-After=network.target
+After=pipewire.service network-online.target
 
 [Service]
 Type=simple
-User=pi
-WorkingDirectory=/home/pi/fall-detect-system
-EnvironmentFile=-/home/pi/fall-detect-system/.env
+WorkingDirectory=__INSTALL_DIR__
 Environment=PYTHONUNBUFFERED=1
-ExecStart=/home/pi/fall-detect-system/.venv/bin/python -m l4_application.server
+ExecStart=__INSTALL_DIR__/.venv/bin/python -m l4_application.server
 Restart=always
 RestartSec=3
+NoNewPrivileges=true
 
 [Install]
-WantedBy=multi-user.target
+WantedBy=default.target

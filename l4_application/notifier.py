@@ -5,7 +5,7 @@
 """
 
 import logging
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 import requests
 
@@ -59,10 +59,18 @@ def create_notifier(bot_token: str, chat_id: str, timeout: float) -> Notifier:
     return DisabledNotifier()
 
 
-def alert_message(event: Dict, delayed: bool = False) -> str:
+def _fmt(iso: str) -> str:
+    return iso[:19].replace("T", " ")
+
+
+def _head(title: str, location: str) -> str:
+    return f"[{title}] {location}".rstrip()
+
+
+def alert_message(event: Dict, delayed: bool = False, location: str = "") -> str:
     lines = [
-        "[낙상 의심 경보]" + (" (지연 전송)" if delayed else ""),
-        f"발생 시각: {event['started_at'][:19].replace('T', ' ')}",
+        _head("낙상 의심 경보" + (" - 지연 전송" if delayed else ""), location),
+        f"발생 시각: {_fmt(event['started_at'])}",
         f"판정: {RESULT_LABELS.get(event['result'], event['result'])}",
     ]
     if delayed:
@@ -71,11 +79,33 @@ def alert_message(event: Dict, delayed: bool = False) -> str:
     return "\n".join(lines)
 
 
-def clear_message(event: Dict, cleared_by: Optional[str]) -> str:
+def clear_message(event: Dict, cleared_by: Optional[str], location: str = "") -> str:
     by = {"BUTTON": "현장 화면 버튼"}.get(cleared_by or "", cleared_by or "사용자")
     return "\n".join([
-        "[경보 해제]",
-        f"발생 시각: {event['started_at'][:19].replace('T', ' ')}",
+        _head("경보 해제", location),
+        f"발생 시각: {_fmt(event['started_at'])}",
         f"해제 방법: {by}",
         "현장에서 사용자가 경보를 해제했습니다.",
+    ])
+
+
+def device_problem_message(problems: List[str], since_iso: str, location: str = "") -> str:
+    return "\n".join([
+        _head("장치 이상 - 낙상 감지 중단 가능", location),
+        f"시작 시각: {_fmt(since_iso)}",
+        *[f"- {p}" for p in problems],
+        "이 상태에서는 낙상을 감지하지 못할 수 있습니다. 장치를 확인해 주세요.",
+    ])
+
+
+def device_recovered_message(location: str = "") -> str:
+    return "\n".join([_head("장치 정상 복구", location), "낙상 감지가 다시 동작합니다."])
+
+
+def daily_message(events_24h: int, alarms_24h: int, problems: List[str], location: str = "") -> str:
+    status = "정상 동작 중" if not problems else "점검 필요: " + ", ".join(problems)
+    return "\n".join([
+        _head("일일 상태", location),
+        f"상태: {status}",
+        f"최근 24시간 낙상 의심 {events_24h}건, 경보 {alarms_24h}건",
     ])

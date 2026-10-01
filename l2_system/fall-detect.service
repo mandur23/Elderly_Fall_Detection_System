@@ -1,17 +1,21 @@
+# 사용자 서비스 템플릿. setup_pi.sh가 __INSTALL_DIR__를 바꿔 ~/.config/systemd/user/에 설치한다.
 [Unit]
 Description=Fall detection L3 - camera, pose estimation, fall suspicion
 After=fall-app.service
 Wants=fall-app.service
 
 [Service]
-Type=simple
-User=pi
-WorkingDirectory=/home/pi/fall-detect-system
-EnvironmentFile=-/home/pi/fall-detect-system/.env
+# 감지 루프가 매 프레임 WATCHDOG=1을 보낸다. 30초 동안 없으면(카메라 드라이버 정지 등) 재시작한다.
+Type=notify
+NotifyAccess=main
+WatchdogSec=30
+TimeoutStartSec=120
+WorkingDirectory=__INSTALL_DIR__
 Environment=PYTHONUNBUFFERED=1
-ExecStart=/home/pi/fall-detect-system/.venv/bin/python -m l3_perception.fall_detector
+ExecStart=__INSTALL_DIR__/.venv/bin/python -m l3_perception.fall_detector
 Restart=always
 RestartSec=3
+NoNewPrivileges=true
 
 [Install]
-WantedBy=multi-user.target
+WantedBy=default.target

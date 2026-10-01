@@ -1,0 +1,19 @@
+# 기기별 설정. config.py의 값을 덮어쓴다. 키 이름은 config.py의 변수 이름과 같다.
+# 이 파일은 저장소에 올리지 않는다(.gitignore).
+
+DEVICE_NAME = "거실"                 # 알림 메시지에 표시할 설치 위치
+TELEGRAM_BOT_TOKEN = ""              # BotFather에서 발급
+TELEGRAM_CHAT_ID = ""                # 보호자 개인 또는 그룹 chat_id
+INTERNAL_API_TOKEN = "__INTERNAL_API_TOKEN__"
+
+# 카메라 ("auto" | "picamera2" | "opencv")
+CAMERA_BACKEND = "auto"
+CAMERA_ROTATION = 0
+
+# 장치 이상이 이 시간(초) 이상 이어지면 보호자에게 알림
+DEVICE_ALERT_AFTER_SECONDS = 180
+# 매일 상태 보고 시각 (사용하지 않으려면 주석 처리)
+# DAILY_REPORT_TIME = "09:00"
+
+# 이벤트 보관 기간(일). 보관 정책을 정한 뒤 설정
+# EVENT_RETENTION_DAYS = 90

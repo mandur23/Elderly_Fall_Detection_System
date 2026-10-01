@@ -4,11 +4,16 @@
 실제로는 아무것도 감지하지 않으면서 화면에는 '정상'이 표시되기 때문이다.
 """
 
+import logging
+import time
+from pathlib import Path
 from typing import Optional
 
 import numpy as np
 
 from l3_perception.features import Keypoints
+
+log = logging.getLogger("l3.pose")
 
 
 class PoseDetectorError(RuntimeError):
@@ -18,22 +23,32 @@ class PoseDetectorError(RuntimeError):
 class PoseDetector:
     name = "base"
 
-    def detect(self, frame: np.ndarray) -> Optional[Keypoints]:
+    def detect(self, frame: np.ndarray, t: Optional[float] = None) -> Optional[Keypoints]:
+        """t: 프레임 시각(초). 영상 모드 추적을 쓰는 모델에 필요하다."""
         raise NotImplementedError
 
     def close(self) -> None:
         pass
 
 
+# 팔 관절(팔꿈치·손목·손가락). 팔을 벌리면 바운딩 박스가 넓어져 서 있어도 '누움'처럼 보이므로
+# 종횡비 계산에서 뺀다. (실사진 확인: 달리는 자세에서 팔 포함 시 종횡비 1.51 -> 누움 오판)
+MEDIAPIPE_ARMS = tuple(range(13, 23))
+COCO_ARMS = (7, 8, 9, 10)
+
+
 def _keypoints_from(points: np.ndarray, conf: np.ndarray, idx_ls: int, idx_rs: int,
-                    idx_lh: int, idx_rh: int, min_conf: float) -> Optional[Keypoints]:
+                    idx_lh: int, idx_rh: int, min_conf: float, arms=()) -> Optional[Keypoints]:
     """어깨·엉덩이 4점이 모두 신뢰도 기준을 넘을 때만 Keypoints를 만든다."""
     core = [idx_ls, idx_rs, idx_lh, idx_rh]
     if np.any(conf[core] < min_conf):
         return None
     visible = points[conf >= min_conf]
-    xmin, ymin = visible.min(axis=0)
-    xmax, ymax = visible.max(axis=0)
+    body = np.ones(len(points), dtype=bool)
+    body[list(arms)] = False
+    body_pts = points[body & (conf >= min_conf)]
+    xmin, ymin = body_pts.min(axis=0)
+    xmax, ymax = body_pts.max(axis=0)
     return Keypoints(
         left_shoulder=tuple(points[idx_ls]),
         right_shoulder=tuple(points[idx_rs]),
@@ -46,31 +61,69 @@ def _keypoints_from(points: np.ndarray, conf: np.ndarray, idx_ls: int, idx_rs: i
 
 
 class MediaPipePoseDetector(PoseDetector):
-    """MediaPipe Pose (Apache-2.0). 랜드마크 11/12 어깨, 23/24 엉덩이."""
+    """MediaPipe Pose (Apache-2.0). 랜드마크 11/12 어깨, 23/24 엉덩이.
+
+    모델 파일(.task)이 있으면 Tasks API(PoseLandmarker, 영상 모드)를 쓰고,
+    없으면 구버전 solutions API로 대체한다.
+    """
     name = "mediapipe"
 
-    def __init__(self, min_conf: float):
+    def __init__(self, min_conf: float, model_path=None):
         try:
             import mediapipe as mp
         except ImportError as e:
             raise PoseDetectorError("mediapipe 패키지가 설치되지 않았습니다.") from e
+        self._mp = mp
         self.min_conf = min_conf
-        self._pose = mp.solutions.pose.Pose(static_image_mode=False, model_complexity=1,
-                                            min_detection_confidence=0.5)
+        self._last_ts_ms = -1
+        self._landmarker = None
+        self._legacy = None
+        if model_path is not None and Path(model_path).exists():
+            from mediapipe.tasks.python import BaseOptions, vision
+            options = vision.PoseLandmarkerOptions(
+                base_options=BaseOptions(model_asset_path=str(model_path)),
+                running_mode=vision.RunningMode.VIDEO,
+                num_poses=1,
+                min_pose_detection_confidence=0.5,
+                min_pose_presence_confidence=0.5,
+                min_tracking_confidence=0.5,
+            )
+            self._landmarker = vision.PoseLandmarker.create_from_options(options)
+        elif hasattr(mp, "solutions"):
+            log.warning("MediaPipe 모델 파일이 없어 구버전 API를 사용합니다: %s", model_path)
+            self._legacy = mp.solutions.pose.Pose(static_image_mode=False, model_complexity=1,
+                                                  min_detection_confidence=0.5)
+        else:
+            raise PoseDetectorError(f"MediaPipe 모델 파일이 없습니다: {model_path}")
 
-    def detect(self, frame: np.ndarray) -> Optional[Keypoints]:
+    def detect(self, frame: np.ndarray, t: Optional[float] = None) -> Optional[Keypoints]:
         import cv2
         h, w = frame.shape[:2]
-        results = self._pose.process(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-        if not results.pose_landmarks:
-            return None
-        lms = results.pose_landmarks.landmark
+        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        if self._landmarker is not None:
+            # 영상 모드는 단조 증가하는 타임스탬프(ms)가 필요하다.
+            ts = int((t if t is not None else time.time()) * 1000)
+            ts = max(ts, self._last_ts_ms + 1)
+            self._last_ts_ms = ts
+            image = self._mp.Image(image_format=self._mp.ImageFormat.SRGB, data=rgb)
+            result = self._landmarker.detect_for_video(image, ts)
+            if not result.pose_landmarks:
+                return None
+            lms = result.pose_landmarks[0]
+        else:
+            result = self._legacy.process(rgb)
+            if not result.pose_landmarks:
+                return None
+            lms = result.pose_landmarks.landmark
         points = np.array([[lm.x * w, lm.y * h] for lm in lms])
         conf = np.array([lm.visibility for lm in lms])
-        return _keypoints_from(points, conf, 11, 12, 23, 24, self.min_conf)
+        return _keypoints_from(points, conf, 11, 12, 23, 24, self.min_conf, MEDIAPIPE_ARMS)
 
     def close(self) -> None:
-        self._pose.close()
+        if self._landmarker is not None:
+            self._landmarker.close()
+        if self._legacy is not None:
+            self._legacy.close()
 
 
 class YoloPoseDetector(PoseDetector):
@@ -85,7 +138,7 @@ class YoloPoseDetector(PoseDetector):
         self.min_conf = min_conf
         self._model = YOLO(model_path)
 
-    def detect(self, frame: np.ndarray) -> Optional[Keypoints]:
+    def detect(self, frame: np.ndarray, t: Optional[float] = None) -> Optional[Keypoints]:
         result = self._model(frame, verbose=False)[0]
         if result.keypoints is None or result.boxes is None or len(result.boxes) == 0:
             return None
@@ -95,7 +148,7 @@ class YoloPoseDetector(PoseDetector):
             conf = result.keypoints.conf.cpu().numpy()[best]
         else:
             conf = np.ones(len(points))
-        return _keypoints_from(points, conf, 5, 6, 11, 12, self.min_conf)
+        return _keypoints_from(points, conf, 5, 6, 11, 12, self.min_conf, COCO_ARMS)
 
 
 class MockPoseDetector(PoseDetector):
@@ -140,7 +193,7 @@ class MockPoseDetector(PoseDetector):
         return Keypoints(tuple(ls), tuple(rs), tuple(lh), tuple(rh),
                          (xmin, ymin, xmax, ymax), pts, 0.95)
 
-    def detect(self, frame: Optional[np.ndarray]) -> Optional[Keypoints]:
+    def detect(self, frame: Optional[np.ndarray], t: Optional[float] = None) -> Optional[Keypoints]:
         self.step += 1
         stand_hip, floor_hip = 0.55 * self.h, 0.85 * self.h
 
@@ -160,9 +213,9 @@ class MockPoseDetector(PoseDetector):
 
 
 def create_detector(model: str, min_conf: float, yolo_model_path: str,
-                    width: int, height: int) -> PoseDetector:
+                    width: int, height: int, mediapipe_model_path=None) -> PoseDetector:
     if model == "mediapipe":
-        return MediaPipePoseDetector(min_conf)
+        return MediaPipePoseDetector(min_conf, mediapipe_model_path)
     if model == "yolo":
         return YoloPoseDetector(yolo_model_path, min_conf)
     if model == "mock":

@@ -30,7 +30,6 @@ class FallFSM:
         angle_lying: float,
         aspect_lying: float,
         angle_standing: float,
-        aspect_standing: float,
         on_state_change: Optional[StateCallback] = None,
     ):
         self.descent_peak = descent_peak
@@ -39,7 +38,6 @@ class FallFSM:
         self.angle_lying = angle_lying
         self.aspect_lying = aspect_lying
         self.angle_standing = angle_standing
-        self.aspect_standing = aspect_standing
         self.on_state_change = on_state_change
 
         self.state = FallState.NORMAL
@@ -48,10 +46,15 @@ class FallFSM:
         self.suspect_features: Optional[Dict[str, float]] = None
 
     def is_lying(self, f: Dict[str, float]) -> bool:
-        return f["torso_angle"] >= self.angle_lying or f["aspect_ratio"] >= self.aspect_lying
+        """몸통 각도가 주 기준이다. 종횡비는 몸통도 어느 정도 기울었을 때만 보조로 쓴다.
+
+        실사진 확인 결과, 다리를 벌리고 선 자세는 종횡비가 1을 넘어 종횡비만으로는 누움과 구분되지 않았다.
+        """
+        angle = f["torso_angle"]
+        return angle >= self.angle_lying or (f["aspect_ratio"] >= self.aspect_lying and angle >= self.angle_standing)
 
     def is_standing(self, f: Dict[str, float]) -> bool:
-        return f["torso_angle"] < self.angle_standing and f["aspect_ratio"] < self.aspect_standing
+        return f["torso_angle"] < self.angle_standing
 
     def _transition(self, new_state: FallState, now: float, features: Optional[Dict[str, float]]) -> None:
         old_state = self.state

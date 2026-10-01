@@ -69,7 +69,9 @@ function render(data) {
   }
 
   const list = $("problems");
-  list.replaceChildren(...problems.map((p) => {
+  const lines = data && data.device_alert_sent && hasProblem
+    ? [...problems, "보호자에게 장치 이상을 알렸습니다"] : problems;
+  list.replaceChildren(...lines.map((p) => {
     const li = document.createElement("li");
     li.textContent = p;
     return li;

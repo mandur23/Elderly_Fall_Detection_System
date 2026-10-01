@@ -13,7 +13,9 @@ from typing import Dict, List, Optional, Sequence
 
 from l4_application import database as db_mod
 from l4_application.database import Database
-from l4_application.notifier import Notifier, NotifierError, alert_message, clear_message
+from l4_application.audio import Siren
+from l4_application.notifier import (Notifier, NotifierError, alert_message, clear_message, daily_message,
+                                     device_problem_message, device_recovered_message)
 from l4_application import voice_checker as voice_mod
 from l4_application.voice_checker import VoiceChecker
 
@@ -26,7 +28,10 @@ class ApplicationService:
     def __init__(self, db: Database, voice: VoiceChecker, notifier: Notifier, *,
                  voice_attempts: int, listen_seconds: float, retry_delays: Sequence[float],
                  retry_check_seconds: float, heartbeat_stale_seconds: float,
-                 store_voice_text: bool = False, retention_days: Optional[int] = None):
+                 store_voice_text: bool = False, retention_days: Optional[int] = None,
+                 siren: Optional[Siren] = None, device_alert_after: float = 180.0,
+                 daily_report_time: Optional[str] = None, location: str = "",
+                 monitor_interval: float = 5.0):
         self.db = db
         self.voice = voice
         self.notifier = notifier
@@ -37,6 +42,11 @@ class ApplicationService:
         self.heartbeat_stale_seconds = heartbeat_stale_seconds
         self.store_voice_text = store_voice_text
         self.retention_days = retention_days
+        self.siren = siren or Siren()
+        self.device_alert_after = device_alert_after
+        self.daily_report_time = daily_report_time
+        self.location = location
+        self.monitor_interval = monitor_interval
 
         self._lock = threading.RLock()
         self.state = NORMAL
@@ -46,6 +56,12 @@ class ApplicationService:
         self._heartbeat_at: Optional[float] = None
         self._stop = threading.Event()
         self._retry_thread = threading.Thread(target=self._retry_loop, name="notify-retry", daemon=True)
+        self._monitor_thread = threading.Thread(target=self._monitor_loop, name="device-monitor", daemon=True)
+        # 장치 이상 알림 상태
+        self._problem_since: Optional[float] = None
+        self._problem_since_iso: Optional[str] = None
+        self._device_alert_sent = False
+        self._last_daily_date: Optional[str] = None
 
     # --- 수명 주기 ---
     def start(self) -> None:
@@ -55,9 +71,11 @@ class ApplicationService:
         if self.retention_days:
             self.db.purge_older_than(self.retention_days)
         self._retry_thread.start()
+        self._monitor_thread.start()
 
     def stop(self) -> None:
         self._stop.set()
+        self.siren.stop()
 
     def _is_active(self, event_id: int, state: str) -> bool:
         return self.event_id == event_id and self.state == state
@@ -129,6 +147,7 @@ class ApplicationService:
         self.db.set_result(event_id, result, voice_result, self._voice_text(text), ended=False)
         self.db.set_notify_state(event_id, db_mod.NOTIFY_PENDING)
         self.state = ALARM
+        self.siren.start()
         log.warning("이벤트 #%d 경보: %s", event_id, result)
 
     # --- 알림 ---
@@ -137,12 +156,12 @@ class ApplicationService:
         if event is None:
             return
         if not self.notifier.enabled:
-            self.notifier.send(alert_message(event, delayed))
+            self.notifier.send(alert_message(event, delayed, self.location))
             self.db.set_notify_state(event_id, db_mod.NOTIFY_DISABLED)
             return
         self.db.set_notify_state(event_id, db_mod.NOTIFY_PENDING)
         try:
-            self.notifier.send(alert_message(event, delayed))
+            self.notifier.send(alert_message(event, delayed, self.location))
         except NotifierError as e:
             delay = self.retry_delays[min(event["notify_attempts"], len(self.retry_delays) - 1)]
             next_at = (datetime.now() + timedelta(seconds=delay)).isoformat(timespec="milliseconds")
@@ -164,7 +183,7 @@ class ApplicationService:
     def _send_clear(self, event_id: int) -> None:
         event = self.db.get_event(event_id)
         try:
-            self.notifier.send(clear_message(event, event["cleared_by"]))
+            self.notifier.send(clear_message(event, event["cleared_by"], self.location))
         except NotifierError as e:
             log.error("이벤트 #%d 해제 알림 전송 실패: %s", event_id, e)
 
@@ -173,6 +192,61 @@ class ApplicationService:
             for event in self.db.due_retries():
                 log.info("이벤트 #%d 알림 재전송 시도", event["id"])
                 self._send_alert(event["id"], delayed=True)
+
+    # --- 장치 상태 감시 ---
+    def _monitor_loop(self) -> None:
+        while not self._stop.wait(self.monitor_interval):
+            try:
+                self.check_devices(time.monotonic(), datetime.now())
+            except Exception:
+                log.exception("장치 상태 점검 중 오류")
+
+    def _send_system(self, kind: str, text: str) -> bool:
+        """장치 이상·복구·일일 보고 전송. 성공(또는 알림 미설정)이면 True."""
+        if not self.notifier.enabled:
+            self.notifier.send(text)
+            self.db.insert_system_event(kind, text, db_mod.NOTIFY_DISABLED)
+            return True
+        try:
+            self.notifier.send(text)
+        except NotifierError as e:
+            log.error("%s 알림 전송 실패: %s", kind, e)
+            return False
+        self.db.insert_system_event(kind, text, db_mod.NOTIFY_SENT)
+        return True
+
+    def check_devices(self, mono_now: float, wall_now: datetime) -> None:
+        """감지가 멈춘 상태가 오래 이어지면 보호자에게 알리고, 복구되면 다시 알린다.
+
+        현장 화면 표시만으로는 아무도 화면을 보지 않을 때 감지 중단을 알 수 없기 때문이다.
+        전송에 실패하면 다음 점검 때 다시 시도한다.
+        """
+        with self._lock:
+            problems = self._device_problems(mono_now)
+        if problems:
+            if self._problem_since is None:
+                self._problem_since = mono_now
+                self._problem_since_iso = wall_now.isoformat(timespec="milliseconds")
+                log.warning("장치 이상 감지: %s", problems)
+            if not self._device_alert_sent and mono_now - self._problem_since >= self.device_alert_after:
+                text = device_problem_message(problems, self._problem_since_iso, self.location)
+                self._device_alert_sent = self._send_system("DEVICE_PROBLEM", text)
+        elif self._problem_since is not None:
+            if self._device_alert_sent:
+                if not self._send_system("DEVICE_RECOVERED", device_recovered_message(self.location)):
+                    return
+            log.info("장치 상태 정상 복구")
+            self._problem_since = self._problem_since_iso = None
+            self._device_alert_sent = False
+
+        if self.daily_report_time and wall_now.strftime("%H:%M") == self.daily_report_time:
+            today = wall_now.date().isoformat()
+            if self._last_daily_date != today:
+                since = (wall_now - timedelta(days=1)).isoformat(timespec="milliseconds")
+                counts = self.db.counts_since(since)
+                text = daily_message(counts["events"], counts["alarms"], problems, self.location)
+                if self._send_system("DAILY_REPORT", text):
+                    self._last_daily_date = today
 
     # --- 화면 입력 ---
     def clear_by_button(self) -> bool:
@@ -185,6 +259,7 @@ class ApplicationService:
             if self.state == SUSPECT:
                 self._finish(event_id, db_mod.CLEARED_BUTTON, None, None)
                 return True
+            self.siren.stop()
             self.db.close_event(event_id, "BUTTON")
             notify_state = self.db.get_event(event_id)["notify_state"]
             if notify_state == db_mod.NOTIFY_SENT:
@@ -199,10 +274,11 @@ class ApplicationService:
         return True
 
     # --- 화면 조회 ---
-    def _device_problems(self) -> List[str]:
+    def _device_problems(self, mono_now: Optional[float] = None) -> List[str]:
+        mono_now = time.monotonic() if mono_now is None else mono_now
         problems = []
         hb = self._heartbeat
-        if self._heartbeat_at is None or time.monotonic() - self._heartbeat_at > self.heartbeat_stale_seconds:
+        if self._heartbeat_at is None or mono_now - self._heartbeat_at > self.heartbeat_stale_seconds:
             problems.append("영상 감지 프로그램이 응답하지 않습니다")
         else:
             if not hb.get("detector_ok", True):
@@ -232,6 +308,7 @@ class ApplicationService:
                 "event": event,
                 "problems": self._device_problems(),
                 "notifier_enabled": self.notifier.enabled,
+                "device_alert_sent": self._device_alert_sent,
                 "person_detected": hb.get("person_detected"),
                 "fps": hb.get("fps"),
                 "features": hb.get("features"),

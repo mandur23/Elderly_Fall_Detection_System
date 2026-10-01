@@ -7,11 +7,11 @@
 
 import json
 import logging
-import os
 import queue
-import subprocess
 from pathlib import Path
 from typing import Iterable, Optional, Tuple
+
+from l4_application.audio import PromptPlayer
 
 log = logging.getLogger("l4.voice")
 
@@ -57,21 +57,15 @@ class VoiceChecker:
         return classify(text, *self.keywords)
 
 
-def play_wav_blocking(path: Path) -> None:
-    if os.name == "nt":
-        import winsound
-        winsound.PlaySound(str(path), winsound.SND_FILENAME)
-    else:
-        subprocess.run(["aplay", "-q", str(path)], check=True, timeout=30)
-
-
 class VoskVoiceChecker(VoiceChecker):
     name = "vosk"
 
-    def __init__(self, keywords, model_path: Path, prompt_wav: Path, sample_rate: int):
+    def __init__(self, keywords, model_path: Path, prompt: PromptPlayer, sample_rate: int,
+                 mic_device=None):
         super().__init__(keywords)
-        self.prompt_wav = prompt_wav
+        self.prompt = prompt
         self.sample_rate = sample_rate
+        self.mic_device = mic_device
         self.model = None
         try:
             from vosk import Model, SetLogLevel
@@ -83,16 +77,9 @@ class VoskVoiceChecker(VoiceChecker):
         except Exception as e:
             self.error = f"음성 인식 준비 실패: {e}"
             log.error(self.error)
-        if not prompt_wav.exists():
-            log.warning("안내 음성 파일이 없습니다: %s (화면 안내만 표시됩니다)", prompt_wav)
 
     def play_prompt(self) -> None:
-        if not self.prompt_wav.exists():
-            return
-        try:
-            play_wav_blocking(self.prompt_wav)
-        except Exception as e:
-            log.error("안내 음성 재생 실패: %s", e)
+        self.prompt.play()
 
     def listen(self, seconds: float) -> Tuple[str, Optional[str]]:
         if self.model is None:
@@ -101,16 +88,21 @@ class VoskVoiceChecker(VoiceChecker):
             import sounddevice as sd
             from vosk import KaldiRecognizer
             audio = sd.rec(int(seconds * self.sample_rate), samplerate=self.sample_rate,
-                           channels=1, dtype="int16")
+                           channels=1, dtype="int16", device=self.mic_device)
             sd.wait()
-            rec = KaldiRecognizer(self.model, self.sample_rate)
-            rec.AcceptWaveform(audio.tobytes())
-            text = json.loads(rec.FinalResult()).get("text", "").strip()
         except Exception as e:
             self.error = f"마이크 오류: {e}"
             log.error(self.error)
             return DEVICE_FAIL, None
+        if int(abs(audio).max()) == 0:
+            # 완전한 무음은 조용한 방이 아니라 마이크 고장·음소거일 가능성이 높다.
+            self.error = "마이크 입력이 없습니다 (연결·음소거 확인)"
+            log.error(self.error)
+            return DEVICE_FAIL, None
         self.error = None
+        rec = KaldiRecognizer(self.model, self.sample_rate)
+        rec.AcceptWaveform(audio.tobytes())
+        text = json.loads(rec.FinalResult()).get("text", "").strip()
         log.info("음성 인식 결과: '%s'", text)
         return self._classify(text), text or None
 

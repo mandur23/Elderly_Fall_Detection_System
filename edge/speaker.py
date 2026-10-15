@@ -303,7 +303,7 @@ class SoundDeviceSpeaker(Speaker):
                 self._stop.wait(delay)
                 continue
             self._latency = float(stream.latency or 0.1)
-            log.info("스피커 열림: %s (지연 %.0fms)", stream.device, self._latency * 1000)
+            log.info("스피커 열림: %s (지연 %.0fms)", _device_name(sd, stream.device), self._latency * 1000)
             self._last_callback = time.monotonic()
             self._open, self._error = True, ""
             try:
@@ -327,3 +327,10 @@ class SoundDeviceSpeaker(Speaker):
                 attempt += 1
                 log.warning("%s (%.0f초 뒤 다시 엽니다)", self._error, delay)
                 self._stop.wait(delay)
+
+
+def _device_name(sd, device) -> str:
+    try:
+        return f"{device} {sd.query_devices(device)['name']}"
+    except Exception:
+        return str(device)

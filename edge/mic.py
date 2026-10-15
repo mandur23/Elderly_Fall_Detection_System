@@ -141,7 +141,7 @@ class SoundDeviceMicrophone(Microphone):
                 log.warning("%s (%.0f초 뒤 다시 시도)", self._error, delay)
                 self._stop.wait(delay)
                 continue
-            log.info("마이크 열림: %s", stream.device)
+            log.info("마이크 열림: %s", _device_name(sd, stream.device))
             self._last_callback = time.monotonic()
             self._open, self._error = True, ""
             try:
@@ -165,3 +165,10 @@ class SoundDeviceMicrophone(Microphone):
                 attempt += 1
                 log.warning("%s (%.0f초 뒤 다시 엽니다)", self._error, delay)
                 self._stop.wait(delay)
+
+
+def _device_name(sd, device) -> str:
+    try:
+        return f"{device} {sd.query_devices(device)['name']}"
+    except Exception:
+        return str(device)

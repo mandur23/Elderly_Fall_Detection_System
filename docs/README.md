@@ -4,7 +4,8 @@
 
 - [프로젝트 계획](PROJECT_PLAN.md): 목표, 범위, 일정과 미결정 사항
 - [요구사항](REQUIREMENTS.md): 기능 목표와 확인 기준
-- [시스템 구성](ARCHITECTURE.md): 처리 흐름과 구성 요소
+- [시스템 구성](ARCHITECTURE.md): 처리 흐름과 구성 요소 (이전 구조 기준)
+- [통신 규약](PROTOCOL.md): 새 구조에서 라즈베리파이(edge)와 PC 서버(server)가 주고받는 영상·음성·제어 메시지
 - [장비 및 개발 환경](HARDWARE.md): 예정 장비와 구축 순서
 - [테스트 계획](TEST_PLAN.md): 검증 시나리오와 기록 항목
 - [성능 평가 기록](EVALUATION.md): 공개 낙상 영상·합성 음성·PC 실제 장치로 측정한 결과와 판정 기준을 정한 근거

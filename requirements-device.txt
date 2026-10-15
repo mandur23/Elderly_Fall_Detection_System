@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 # 실제 장치(Raspberry Pi)에서 필요한 패키지. setup_pi.sh가 설치한다.
 opencv-python-headless>=4.8
 mediapipe>=0.10.14        # Tasks API(PoseLandmarker) 사용. 구버전 solutions API는 1.0에서 제거됨

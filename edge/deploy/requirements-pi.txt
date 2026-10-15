@@ -1,0 +1,4 @@
+# 라즈베리파이에서 pip로 설치하는 패키지. numpy·OpenCV·picamera2는 apt(python3-numpy, python3-opencv,
+# python3-picamera2)로 설치하고 --system-site-packages 가상환경에서 그대로 쓴다 (install.sh).
+aiohttp>=3.8
+sounddevice>=0.4.6

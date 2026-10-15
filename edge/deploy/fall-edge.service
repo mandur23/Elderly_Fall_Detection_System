@@ -1,0 +1,20 @@
+# 사용자 서비스 템플릿. install.sh가 __INSTALL_DIR__를 바꿔 ~/.config/systemd/user/에 설치한다.
+# 오디오(PipeWire)가 사용자 세션에서 동작하므로 시스템 서비스가 아니라 사용자 서비스로 실행한다.
+[Unit]
+Description=Fall detection edge - camera, microphone and speaker I/O for the PC server
+After=pipewire.service pipewire-pulse.service wireplumber.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+WorkingDirectory=__INSTALL_DIR__
+Environment=PYTHONUNBUFFERED=1
+ExecStart=__INSTALL_DIR__/.venv/bin/python -m edge
+# 서버 연결이 끊기면 프로그램이 스스로 다시 접속한다. 프로그램이 끝나면(카메라 드라이버 정지 등) 다시 띄운다.
+Restart=always
+RestartSec=3
+TimeoutStopSec=10
+NoNewPrivileges=true
+
+[Install]
+WantedBy=default.target

@@ -8,7 +8,7 @@ from pathlib import Path
 
 from server import store as st
 from server.device import DeviceRegistry
-from server.events import ALARM, NORMAL, EventService
+from server.events import ALARM, NORMAL, Case, EventService
 from server.fall import FallParams, FallState
 from server.store import Store, now_iso
 from server.tests.fakes import (FakeNotifier, FakePoseFactory, FakeRecognizer, fall_script, make_settings,
@@ -40,7 +40,7 @@ class EventServiceTestBase(unittest.IsolatedAsyncioTestCase):
         async def prompt():
             return prompt_sound()
 
-        def on_finished():
+        def on_finished(device_id):
             self.finished += 1
 
         self.service = EventService(self.settings, self.store, self.devices, FakeRecognizer(), self.notifier,
@@ -61,13 +61,11 @@ class EventServiceTestBase(unittest.IsolatedAsyncioTestCase):
 
 class RestartTest(EventServiceTestBase):
     async def test_restore_after_restart(self):
-        unfinished = self.store.insert_event("pi-1", None)      # 음성 확인 도중 꺼짐
         alarm = self.alarm_event()                               # 경보 알림을 보내는 도중 꺼짐
         service = self.make_service()
         await service.start()
 
-        self.assertEqual(self.store.get_event(unfinished)["result"], st.INTERRUPTED)
-        self.assertEqual((service.state, service.event_id), (ALARM, alarm))  # 해제 안 된 경보 복원
+        self.assertEqual((service.state, service.case("pi-1").event_id), (ALARM, alarm))  # 해제 안 된 경보 복원
         self.assertEqual(self.store.get_event(alarm)["notify_state"], st.NOTIFY_FAILED)
 
         await service.retry_due()  # 끊긴 알림 다시 보내기
@@ -82,6 +80,60 @@ class RestartTest(EventServiceTestBase):
         self.assertEqual(self.store.get_event(alarm)["cleared_by"], "BUTTON")
         self.assertIn("경보 해제", self.notifier.sent[-1])
         self.assertEqual(self.finished, 1)
+
+    async def test_voice_check_cut_by_restart_becomes_alarm(self):
+        # 음성 확인 도중 서버가 꺼지면 넘어진 사람은 계속 누워 있어 다시 감지되지 않을 수 있다: 경보로 올리고 알린다.
+        unfinished = self.store.insert_event("pi-2", None)
+        service = self.make_service()
+        await service.start()
+        ev = self.store.get_event(unfinished)
+        self.assertEqual((ev["result"], ev["ended_at"]), (st.ALERT_INTERRUPTED, None))
+        self.assertEqual((service.state_of("pi-2"), service.case("pi-2").event_id), (ALARM, unfinished))
+        self.assertIn("pi-2", service.problems_by_subject(0.0))  # 아직 다시 접속하지 않은 장치도 감시 목록에 있다
+        await service.retry_due()
+        self.assertEqual(len(self.notifier.sent), 1)
+        self.assertIn("서버가 다시 시작", self.notifier.sent[0])
+        self.assertIn("지연 전송", self.notifier.sent[0])
+
+    async def test_purge_keeps_open_alarm(self):
+        alarm = self.alarm_event(notify_state=st.NOTIFY_SENT)
+        done = self.store.insert_event("pi-1", None)
+        self.store.set_result(done, st.CLEARED_VOICE)
+        old = now_iso(datetime.now() - timedelta(days=40))
+        self.store._execute("UPDATE events SET started_at = ?", (old,))
+        self.settings.event_retention_days = 30
+        service = self.make_service()
+        await service.start()
+        self.assertIsNone(self.store.get_event(done))
+        self.assertIsNotNone(self.store.get_event(alarm))  # 해제 전 경보는 지우지 않는다
+        self.assertEqual(service.event_snapshot("pi-1")["id"], alarm)
+        self.assertTrue(await service.clear("pi-1"))
+
+    async def test_retry_loop_survives_errors(self):
+        self.settings.notify_retry_check_seconds = 0.01
+        service = self.make_service()
+        calls = []
+
+        async def broken():
+            calls.append(1)
+            raise RuntimeError("boom")
+
+        service.retry_due = broken
+        await service.start()
+        await asyncio.sleep(0.1)
+        self.assertGreater(len(calls), 2)  # 오류가 나도 다시 보내기 확인을 멈추지 않는다
+
+    async def test_restore_alarms_of_each_device(self):
+        first = self.alarm_event()
+        other = self.store.insert_event("pi-2", None)
+        self.store.set_result(other, st.ALERT_HELP, "HELP", ended=False)
+        service = self.make_service()
+        await service.start()
+        self.assertEqual({d: c.event_id for d, c in service.cases.items()}, {"pi-1": first, "pi-2": other})
+        self.assertFalse(await service.clear())  # 진행 중인 이벤트가 여러 개면 장치를 정해야 한다
+        self.assertTrue(await service.clear("pi-2"))
+        self.assertEqual((service.state_of("pi-1"), service.state_of("pi-2")), (ALARM, NORMAL))
+        self.assertTrue(await service.clear())  # 하나만 남으면 장치를 정하지 않아도 그것을 해제
 
     async def test_cleared_alarm_is_not_resent(self):
         alarm = self.alarm_event()
@@ -124,7 +176,7 @@ class NotifyRetryTest(EventServiceTestBase):
         service = self.make_service()
         await service.start()
         event_id = self.alarm_event()
-        service.state, service.event_id = ALARM, event_id
+        service.cases["pi-1"] = Case("pi-1", event_id, ALARM)
         await service._send_alert(event_id)
         await service.clear_by_button()
         self.assertEqual(self.store.get_event(event_id)["notify_state"], st.NOTIFY_CANCELLED)
@@ -165,6 +217,22 @@ class DeviceMonitorTest(EventServiceTestBase):
         self.assertFalse(service.device_alert_sent)
         kinds = [e["kind"] for e in self.store.recent_system_events()]
         self.assertEqual(kinds, ["DEVICE_RECOVERED", "DEVICE_PROBLEM"])
+
+    async def test_each_device_is_watched_separately(self):
+        service = self.make_service()
+        await service.start()
+        self.devices.known.update({"pi-1": {"name": "거실"}, "pi-2": {"name": "안방"}})
+        self.devices.links["pi-1"] = FakeLink("pi-1", "거실")  # 안방은 연결이 끊김
+        await service.check_devices(0.0)
+        await service.check_devices(181.0)
+        self.assertEqual(len(self.notifier.sent), 1)
+        self.assertIn("[장치 이상 - 낙상 감지 중단 가능] 안방", self.notifier.sent[0])
+        self.assertIn("라즈베리파이 연결이 끊겼습니다", self.notifier.sent[0])
+        self.assertEqual(service.problems(device_id="pi-1"), [])
+        self.assertEqual(service.problems(), ["안방: 라즈베리파이 연결이 끊겼습니다"])
+        self.assertTrue(service.alert_sent_for("pi-2"))
+        self.assertFalse(service.alert_sent_for("pi-1"))
+        self.assertEqual(self.store.recent_system_events()[0]["device_id"], "pi-2")
 
     async def test_short_problem_is_not_reported(self):
         service = self.make_service()

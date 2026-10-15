@@ -6,6 +6,7 @@
 SUSPECT는 음성 확인·경보 처리가 끝나 reset()이 불릴 때까지 유지한다. 같은 낙상으로 이벤트가 반복되지 않게 하기 위함이다.
 missing_counts_as_lying이 켜져 있으면 FALLING 중 사람이 안 보이는 프레임도 누운 자세로 센다. 넘어지면서
 화면 아래로 벗어나거나 가구 뒤로 가려지는 경우를 놓치지 않기 위함이다(docs/EVALUATION.md, 14 -> 26/30).
+누운 자세가 lying_gap초 미만으로 잠깐 끊긴 것(바닥에 누운 사람의 자세 추정 흔들림)은 누움 시간을 이어서 잰다.
 """
 
 from __future__ import annotations
@@ -31,6 +32,7 @@ class FallParams:
     angle_standing: float = 40.0
     standing_confirm: float = 0.5
     missing_counts_as_lying: bool = True
+    lying_gap: float = 0.3
 
     @classmethod
     def from_settings(cls, s) -> "FallParams":
@@ -38,7 +40,7 @@ class FallParams:
                    falling_timeout=s.falling_timeout_seconds, angle_lying=s.torso_angle_lying,
                    aspect_lying=s.aspect_ratio_lying, angle_standing=s.torso_angle_standing,
                    standing_confirm=s.standing_confirm_seconds,
-                   missing_counts_as_lying=s.missing_counts_as_lying)
+                   missing_counts_as_lying=s.missing_counts_as_lying, lying_gap=s.lying_gap_seconds)
 
 
 class FallFSM:
@@ -47,6 +49,7 @@ class FallFSM:
         self.state = FallState.NORMAL
         self.state_since = 0.0
         self.lying_since: Optional[float] = None
+        self.not_lying_since: Optional[float] = None  # 누움 시간을 재는 중 누운 자세가 끊긴 시각
         self.standing_since: Optional[float] = None
         self.suspect_features: Optional[Dict[str, float]] = None
 
@@ -66,6 +69,7 @@ class FallFSM:
         self.state = state
         self.state_since = now
         self.standing_since = None
+        self.not_lying_since = None
         if state != FallState.FALLING:
             self.lying_since = None
 
@@ -82,7 +86,7 @@ class FallFSM:
         elif self.state == FallState.FALLING:
             if features is not None and self.is_standing(features):
                 # 쓰러지기 시작한 순간에는 몸통이 아직 서 있으므로 일어선 자세가 이어져야 정상으로 본다.
-                self.lying_since = None
+                self.lying_since = self.not_lying_since = None
                 if self.standing_since is None:
                     self.standing_since = now
                 if now - self.standing_since >= self.p.standing_confirm:
@@ -92,14 +96,19 @@ class FallFSM:
                 self.standing_since = None
                 lying = self.is_lying(features) if features is not None else self.p.missing_counts_as_lying
                 if lying:
+                    self.not_lying_since = None
                     if self.lying_since is None:
                         self.lying_since = now
                     elif now - self.lying_since >= self.p.lying_seconds:
                         self.suspect_features = dict(features) if features is not None else None
                         self._to(FallState.SUSPECT, now)
                     return self.state
-                # 누운 자세가 끊기면 누움 시간을 처음부터 다시 잰다.
-                self.lying_since = None
+                # 누운 자세가 lying_gap초 넘게 끊기면 누움 시간을 처음부터 다시 잰다.
+                if self.lying_since is not None:
+                    if self.not_lying_since is None:
+                        self.not_lying_since = now
+                    if now - self.not_lying_since >= self.p.lying_gap:
+                        self.lying_since = self.not_lying_since = None
             if now - self.state_since >= self.p.falling_timeout:
                 self._to(FallState.NORMAL, now)
 

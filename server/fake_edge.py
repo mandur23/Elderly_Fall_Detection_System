@@ -37,8 +37,8 @@ def noise_chunk(level: int = 30) -> bytes:
 class FakeEdge:
     def __init__(self, url: str, token: str, device_id: str, video: Optional[Path], hold: float, loop_video: bool,
                  replies: List[Optional[bytes]], speaker_ok: bool = True, mic_ok: bool = True,
-                 no_playback_done: bool = False):
-        self.url, self.token, self.device_id = url, token, device_id
+                 no_playback_done: bool = False, name: str = "가짜 edge"):
+        self.url, self.token, self.device_id, self.name = url, token, device_id, name
         self.video, self.hold, self.loop_video = video, hold, loop_video
         self.replies = replies
         self.speaker_ok, self.mic_ok = speaker_ok, mic_ok
@@ -58,7 +58,7 @@ class FakeEdge:
         async with aiohttp.ClientSession() as session:
             async with session.ws_connect(self.url, headers=P.bearer(self.token), heartbeat=P.HEARTBEAT_SECONDS) as ws:
                 self.ws = ws
-                await self.send(P.HELLO, protocol=P.PROTOCOL_VERSION, device_id=self.device_id, name="가짜 edge",
+                await self.send(P.HELLO, protocol=P.PROTOCOL_VERSION, device_id=self.device_id, name=self.name,
                                 software="fake_edge",
                                 video={"width": 640, "height": 480, "fps": 10, "format": "jpeg"},
                                 audio={"rate": P.AUDIO_RATE, "channels": 1, "format": "s16le"})
@@ -186,6 +186,7 @@ def main(argv=None) -> int:
     parser.add_argument("--url", default=f"ws://127.0.0.1:{P.DEFAULT_PORT}{P.WS_PATH}")
     parser.add_argument("--token", required=True)
     parser.add_argument("--device-id", default="fake-edge")
+    parser.add_argument("--name", default="가짜 edge", help="설치 위치 이름 (여러 대를 시험할 때 구분용)")
     parser.add_argument("--video", type=Path, help="영상 파일. 없으면 검은 화면")
     parser.add_argument("--hold", type=float, default=0.0, help="영상이 끝난 뒤 마지막 장면을 몇 초 더 보낼지")
     parser.add_argument("--loop", action="store_true", help="영상 반복")
@@ -199,7 +200,7 @@ def main(argv=None) -> int:
     replies = [None if r.lower() == "none" else wav_to_pcm(Path(r).read_bytes()) for r in args.reply]
     edge = FakeEdge(args.url, args.token, args.device_id, args.video, args.hold, args.loop, replies,
                     speaker_ok=not args.speaker_fail, mic_ok=not args.mic_fail,
-                    no_playback_done=args.no_playback_done)
+                    no_playback_done=args.no_playback_done, name=args.name)
     try:
         asyncio.run(edge.run())
     except KeyboardInterrupt:

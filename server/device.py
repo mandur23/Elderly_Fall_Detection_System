@@ -191,6 +191,14 @@ class DeviceRegistry:
         self.known[link.device_id] = {"name": link.name, "connected": True, "since": link.connected_iso}
         return old
 
+    def remember(self, device_id: str, name: str, last_seen: Optional[str]) -> None:
+        """서버를 다시 켰을 때 전에 접속했던 장치를 '연결 끊김'으로 올려 둔다(기록 파일에서 읽음)."""
+        if device_id not in self.links:
+            self.known[device_id] = {"name": name, "connected": False, "since": last_seen}
+
+    def forget(self, device_id: str) -> None:
+        self.known.pop(device_id, None)
+
     def remove(self, link: DeviceLink) -> bool:
         """현재 연결이면 지우고 True. 이미 새 연결로 바뀌었으면 False."""
         if self.links.get(link.device_id) is not link:
@@ -204,17 +212,3 @@ class DeviceRegistry:
 
     def connected(self) -> List[DeviceLink]:
         return list(self.links.values())
-
-    def problems(self, now: float, status_stale: float, video_stale: float) -> List[str]:
-        out = []
-        if not self.links:
-            out.append("라즈베리파이 연결이 끊겼습니다" if self.known else "라즈베리파이가 아직 연결되지 않았습니다")
-        else:
-            for device_id, info in self.known.items():
-                if device_id not in self.links:
-                    out.append(f"{info['name']} 장치 연결이 끊겼습니다")
-        many = len(self.known) > 1
-        for link in self.links.values():
-            out.extend(f"{link.name}: {p}" if many else p
-                       for p in link.problems(now, status_stale, video_stale))
-        return out

@@ -103,6 +103,8 @@ class MediaPipePoseEstimator(PoseEstimator):
         self._last_ts_ms = -1
 
     def detect(self, rgb: np.ndarray, t: float) -> Optional[Keypoints]:
+        if self._landmarker is None:  # 다시 만들기(reset)가 실패했으면 다음 장면에서 다시 시도한다
+            self._open()
         h, w = rgb.shape[:2]
         # VIDEO 모드는 단조 증가하는 시각(ms)이 필요하다.
         ts = max(int(t * 1000), self._last_ts_ms + 1)

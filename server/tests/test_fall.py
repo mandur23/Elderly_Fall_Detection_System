@@ -31,6 +31,17 @@ class FallFSMTest(unittest.TestCase):
         self.assertEqual((p.descent_peak, p.lying_seconds, p.standing_confirm, p.missing_counts_as_lying),
                          (1.5, 2.0, 0.5, True))
 
+    def test_short_break_in_lying_keeps_counting(self):
+        # 바닥에 누운 사람의 자세 추정이 잠깐 흔들려(누움도 일어섬도 아님) 누움 시간이 처음부터 다시 시작되지 않는다.
+        mid = feat(50)
+        dt = 0.125  # 2진수로 정확한 간격 (부동소수 오차 없이 경계 확인)
+        state, t = run(self.fsm, [(STAND, 4), (FAST, 1), (LIE, 8), (mid, 2), (LIE, 8)], dt=dt)
+        self.assertEqual(state, FallState.SUSPECT)
+
+        fsm = FallFSM(FallParams.from_settings(Settings()))
+        state, _ = run(fsm, [(STAND, 4), (FAST, 1), (LIE, 8), (mid, 4), (LIE, 8)], dt=dt)  # 0.375초 끊김
+        self.assertEqual(state, FallState.FALLING)  # lying_gap(0.3초)보다 길게 끊기면 다시 잰다
+
     def test_fall_then_lying_two_seconds_is_suspect(self):
         state, _ = run(self.fsm, [(STAND, 5), (FAST, 1), (LIE, 20)])  # 누움 1.9초까지
         self.assertEqual(state, FallState.FALLING)
@@ -62,7 +73,7 @@ class FallFSMTest(unittest.TestCase):
 
     def test_lying_interrupted_restarts_timer(self):
         mid = feat(50, 0.5)  # 누움도 일어섬도 아님
-        state, _ = run(self.fsm, [(FAST, 1), (LIE, 15), (mid, 1), (LIE, 15)])
+        state, _ = run(self.fsm, [(FAST, 1), (LIE, 15), (mid, 5), (LIE, 15)])  # lying_gap(0.3초)보다 긴 끊김
         self.assertEqual(state, FallState.FALLING)
 
     def test_timeout_returns_to_normal(self):

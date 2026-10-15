@@ -36,6 +36,7 @@ KEYWORDS_SAFE = ["괜찮", "괜찬", "일어났", "문제없"]
 # 환경변수 -> 설정 항목
 ENV_OVERRIDES = {
     "DEVICE_TOKEN": "device_token",
+    "ADMIN_PASSWORD": "admin_password",
     "TELEGRAM_BOT_TOKEN": "telegram_bot_token",
     "TELEGRAM_CHAT_ID": "telegram_chat_id",
     "FALL_SERVER_HOST": "host",
@@ -56,7 +57,12 @@ class Settings:
     host: str = "0.0.0.0"
     port: int = 8000
     device_token: str = ""          # edge 접속 토큰. 비어 있으면 서버가 시작하지 않는다
-    device_name: str = "거실"        # 설치 위치. 알림 메시지와 welcome에 쓴다
+    # 설치 위치 기본값. 라즈베리파이가 hello로 보낸 이름(edge의 [device] name)이 있으면 그것을 쓴다
+    device_name: str = "거실"
+    # 관리자 화면(/admin) 비밀번호. 비어 있으면 서버 PC 자신(127.0.0.1)에서만 관리자 화면을 열 수 있다
+    admin_password: str = ""
+    # 보호자가 접속하는 주소 (예: http://192.168.0.10:8000, 외부 접속용 https 주소). 있으면 알림에 보호자 웹 링크를 붙인다
+    public_url: str = ""
     log_level: str = "INFO"
 
     # --- 영상 (welcome으로 edge에 알려 준다) ---
@@ -79,6 +85,7 @@ class Settings:
     falling_timeout_seconds: float = 5.0    # 하강 후 누움·일어섬 어느 쪽도 확정되지 않으면 정상 복귀
     standing_confirm_seconds: float = 0.5   # 하강 후 일어선 자세가 이만큼 이어져야 정상 복귀
     missing_counts_as_lying: bool = True    # 하강 후 사람이 안 보이면 누운 것과 같이 본다
+    lying_gap_seconds: float = 0.3          # 누운 자세가 이 시간 미만으로 끊긴 것은 흔들림으로 보고 누움 시간을 이어 잰다
 
     # --- 음성 확인 ---
     vosk_model_path: str = "assets/models/vosk-model-small-ko-0.22"

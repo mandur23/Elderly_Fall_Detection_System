@@ -18,6 +18,7 @@ RESULT_LABELS = {
     "ALERT_HELP": "음성으로 도움 요청",
     "ALERT_NO_REPLY": "음성 확인에 응답 없음",
     "ALERT_VOICE_FAIL": "장치 오류로 음성 확인 불가",
+    "ALERT_INTERRUPTED": "음성 확인 도중 서버가 다시 시작되어 확인하지 못함",
     "ALERT_DISCONNECTED": "음성 확인 중 장치 연결 끊김",
 }
 
@@ -84,7 +85,7 @@ def _head(title: str, location: str) -> str:
     return f"[{title}] {location}".rstrip()
 
 
-def alert_message(event: Dict, delayed: bool = False, location: str = "") -> str:
+def alert_message(event: Dict, delayed: bool = False, location: str = "", link: str = "") -> str:
     lines = [
         _head("낙상 의심 경보" + (" - 지연 전송" if delayed else ""), location),
         f"발생 시각: {_fmt(event['started_at'])}",
@@ -93,16 +94,33 @@ def alert_message(event: Dict, delayed: bool = False, location: str = "") -> str
     if delayed:
         lines.append("통신 장애나 서버 재시작으로 늦게 전달된 알림입니다. 위 발생 시각을 확인해 주세요.")
     lines.append("현장 상태를 확인해 주세요. 이 알림은 보조 수단이며 응급 신고를 대신하지 않습니다.")
+    if link:
+        lines.append(f"보호자 웹: {link}")
     return "\n".join(lines)
 
 
+CLEARED_BY_LABELS = {"BUTTON": "현장 화면 버튼", "ADMIN": "관리자 화면"}
+
+
+def cleared_by_label(cleared_by: str) -> str:
+    if cleared_by.startswith("GUARDIAN:"):
+        return f"보호자 웹 ({cleared_by.split(':', 1)[1]})"
+    return CLEARED_BY_LABELS.get(cleared_by, cleared_by or "사용자")
+
+
 def clear_message(event: Dict, location: str = "") -> str:
-    by = {"BUTTON": "현장 화면 버튼"}.get(event.get("cleared_by") or "", event.get("cleared_by") or "사용자")
+    cleared_by = event.get("cleared_by") or ""
+    if cleared_by == "ADMIN":
+        who = "관리자가 경보를 해제했습니다."
+    elif cleared_by.startswith("GUARDIAN:"):
+        who = "보호자가 보호자 웹에서 경보를 해제했습니다."
+    else:
+        who = "현장에서 경보를 해제했습니다."
     return "\n".join([
         _head("경보 해제", location),
         f"발생 시각: {_fmt(event['started_at'])}",
-        f"해제 방법: {by}",
-        "현장에서 경보를 해제했습니다.",
+        f"해제 방법: {cleared_by_label(cleared_by)}",
+        who,
     ])
 
 

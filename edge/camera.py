@@ -62,7 +62,11 @@ class OpenCVSource(FrameSource):
         self.close()
         if self.is_file and not os.path.isfile(self.source):
             raise CameraError(f"영상 파일이 없습니다: {self.source}")
-        cap = cv2.VideoCapture(self.source)
+        if isinstance(self.source, int) and os.name == "nt":
+            # Windows 기본(MSMF) 방식은 웹캠을 여는 데 20초 넘게 걸리기도 해서 DirectShow를 쓴다.
+            cap = cv2.VideoCapture(self.source, cv2.CAP_DSHOW)
+        else:
+            cap = cv2.VideoCapture(self.source)
         if isinstance(self.source, int):
             cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
             cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)

@@ -1,0 +1,90 @@
+/* 현장 화면: 멀리서도 읽을 수 있는 큰 글씨와 상태별 배경색 */
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  font-family: "Pretendard", "Noto Sans KR", "Noto Sans CJK KR", "Malgun Gothic", sans-serif;
+  height: 100vh;
+  overflow: hidden;
+  user-select: none;
+  transition: background-color 0.3s;
+}
+
+body.view-normal       { background: #1e8449; color: #fff; }
+body.view-suspect      { background: #f1c40f; color: #1c1c1c; }
+body.view-alarm        { background: #b03a2e; color: #fff; }
+body.view-check        { background: #b9770e; color: #fff; }
+body.view-disconnected,
+body.view-offline      { background: #4d5656; color: #fff; }
+
+.screen {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  padding: 16px 24px;
+}
+
+.top {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  font-size: 1.4rem;
+  opacity: 0.9;
+}
+
+.center {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 20px;
+  text-align: center;
+  min-height: 0;
+}
+
+h1 { font-size: clamp(2.5rem, 7vw, 4.5rem); font-weight: 800; }
+#desc { font-size: clamp(1.3rem, 3vw, 2rem); }
+
+.panel { width: min(900px, 100%); }
+.prompt { font-size: clamp(1.6rem, 4vw, 2.6rem); font-weight: 700; line-height: 1.4; }
+.sub { font-size: 1.5rem; margin-top: 12px; font-weight: 600; }
+
+#history-panel h2 { font-size: 1.5rem; margin-bottom: 8px; }
+#events {
+  list-style: none;
+  font-size: 1.3rem;
+  background: rgba(0, 0, 0, 0.15);
+  border-radius: 12px;
+  padding: 12px 16px;
+}
+#events li + li { margin-top: 6px; }
+.note { margin-top: 12px; font-size: 1rem; opacity: 0.85; }
+
+.problems {
+  list-style: none;
+  font-size: 1.5rem;
+  background: rgba(0, 0, 0, 0.25);
+  border-radius: 12px;
+  padding: 12px 20px;
+  width: min(900px, 100%);
+}
+.problems li + li { margin-top: 6px; }
+
+footer { flex-shrink: 0; }
+
+/* 넘어진 상태에서도 누르기 쉽도록 화면 아래 전체 폭 버튼 */
+.clear-btn {
+  width: 100%;
+  min-height: 28vh;
+  border: 6px solid #fff;
+  border-radius: 24px;
+  background: #1e8449;
+  color: #fff;
+  font-size: clamp(2.5rem, 8vw, 5rem);
+  font-weight: 800;
+  cursor: pointer;
+}
+.clear-btn:active { background: #145a32; }
+.clear-btn:disabled { opacity: 0.6; }
+
+.hidden { display: none !important; }

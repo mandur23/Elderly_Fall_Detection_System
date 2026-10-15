@@ -31,7 +31,13 @@
 
 ## 진행 상태
 
-전체 흐름을 잇는 구현과 Raspberry Pi 설치·운영 도구가 있습니다. 장비 없이 가상 사람·가상 음성으로 전체 흐름을 확인했고, 실제 MediaPipe 자세 모델로 특징 계산과 영상 평가 도구가 동작하는 것을 PC에서 확인했습니다. Raspberry Pi 실기기, 실제 마이크·음성 인식, 실제 낙상 영상에서의 성능은 아직 검증하지 않았습니다. 판정 임계값과 대기 시간은 시험용 초기값([config.py](config.py))입니다.
+전체 흐름을 잇는 구현과 Raspberry Pi 설치·운영 도구가 있습니다.
+
+- 공개 낙상 영상(UR Fall, 낙상 30·일상 40)으로 감지 성능을 측정해 판정 기준을 정했습니다. 넘어진 뒤 계속 누워 있다고 가정하면 낙상 26/30 감지, 오경보 1/40입니다.
+- 합성 음성으로 Vosk 음성 확인을 시험해 '괜찮아요' 인식 문제를 고쳤습니다.
+- PC에서 웹캠·마이크·Vosk·MediaPipe로 감지부터 음성 확인, 경보, 화면 해제까지 전체 흐름을 확인했습니다.
+
+자세한 결과와 한계는 [성능 평가 기록](docs/EVALUATION.md)에 있습니다. Raspberry Pi 실기기, 텔레그램 실제 전송, 실제 노인 사용자의 낙상·목소리로는 아직 검증하지 않았습니다.
 
 ## 코드 구조
 
@@ -40,7 +46,7 @@
 | `l3_perception/` | 카메라 입력(Pi 카메라·USB), 자세 추정(MediaPipe·YOLO 후보), 특징 계산, 낙상 의심 판정 |
 | `l4_application/` | 음성 확인, 이벤트 기록(SQLite), 알림(텔레그램 시험 구현), 현장 화면, 로컬 API |
 | `l2_system/` | Raspberry Pi 설치 스크립트, 서비스 파일, 설정 예시 |
-| `tools/` | 장치 점검, 영상 평가, 소리 파일 생성 |
+| `tools/` | 장치 점검, 영상 평가, 공개 낙상 영상 준비, 자세 추정 데모, 소리 파일 생성 |
 | `run_demo.py` | 장비 없이 전체 흐름을 확인하는 데모 |
 | `tests/` | 단위 테스트 |
 
@@ -48,7 +54,7 @@ L3(감지)와 L4(응용)는 별도 프로세스이며 `127.0.0.1` 로컬 API로 
 
 ## 실행 방법
 
-Python 3.10 이상에서 저장소 최상위 폴더 기준으로 실행합니다.
+Python 3.11 이상에서 저장소 최상위 폴더 기준으로 실행합니다(설정 파일을 읽는 `tomllib`이 3.11부터 있습니다).
 
 ```bash
 python -m venv .venv
@@ -81,10 +87,17 @@ bash l2_system/setup_pi.sh
 
 기기별 설정은 `config.local.toml`에 적습니다(예시: `l2_system/config.local.toml.example`). 텔레그램 토큰을 설정하지 않으면 알림을 보내지 않고 화면에 '알림 미설정'으로 표시합니다.
 
-영상 파일로 감지 성능 측정:
+영상 파일로 감지 성능 측정(자세 모델이 필요하므로 `requirements-device.txt`도 설치):
 
 ```bash
-python -m tools.evaluate labels.csv
+python -m tools.prepare_urfall data/urfall --download
+python -m tools.evaluate data/urfall/rgb/labels.csv --hold 3
+```
+
+웹캠이나 영상 파일로 자세 추정과 판정 과정을 화면에 보기(발표·시연용):
+
+```bash
+python -m tools.pose_demo
 ```
 
 상업적 사용 전에 필요한 검증·규제·운영 항목은 [상용화 준비 점검](docs/COMMERCIAL_READINESS.md)에 정리했습니다.
@@ -102,5 +115,6 @@ python -m tools.evaluate labels.csv
 - [시스템 구성](docs/ARCHITECTURE.md)
 - [장비 및 개발 환경](docs/HARDWARE.md)
 - [테스트 계획](docs/TEST_PLAN.md)
+- [성능 평가 기록](docs/EVALUATION.md)
 - [설치 및 운영 안내](docs/OPERATIONS.md)
 - [상용화 준비 점검](docs/COMMERCIAL_READINESS.md)

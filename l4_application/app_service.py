@@ -31,7 +31,7 @@ class ApplicationService:
                  store_voice_text: bool = False, retention_days: Optional[int] = None,
                  siren: Optional[Siren] = None, device_alert_after: float = 180.0,
                  daily_report_time: Optional[str] = None, location: str = "",
-                 monitor_interval: float = 5.0):
+                 monitor_interval: float = 5.0, voice_check_interval: Optional[float] = None):
         self.db = db
         self.voice = voice
         self.notifier = notifier
@@ -47,6 +47,8 @@ class ApplicationService:
         self.daily_report_time = daily_report_time
         self.location = location
         self.monitor_interval = monitor_interval
+        self.voice_check_interval = voice_check_interval
+        self._last_voice_check: Optional[float] = None
 
         self._lock = threading.RLock()
         self.state = NORMAL
@@ -68,6 +70,15 @@ class ApplicationService:
         interrupted = self.db.mark_interrupted()
         if interrupted:
             log.warning("재시작 전 처리되지 않은 이벤트 %d건을 INTERRUPTED로 기록했습니다.", interrupted)
+        requeued = self.db.requeue_pending_notifications()
+        if requeued:
+            log.warning("재시작 전 전송을 마치지 못한 경보 알림 %d건을 다시 보냅니다.", requeued)
+        alarm = self.db.unfinished_alarm()
+        if alarm is not None:
+            # 해제되지 않은 경보는 재시작 후에도 경보로 남겨 현장에서 확인·해제할 수 있게 한다.
+            self.state, self.event_id = ALARM, alarm["id"]
+            self.siren.start()
+            log.warning("재시작 전 해제되지 않은 경보 #%d를 다시 표시합니다.", alarm["id"])
         if self.retention_days:
             self.db.purge_older_than(self.retention_days)
         self._retry_thread.start()
@@ -152,14 +163,17 @@ class ApplicationService:
 
     # --- 알림 ---
     def _send_alert(self, event_id: int, delayed: bool = False) -> None:
-        event = self.db.get_event(event_id)
-        if event is None:
-            return
+        with self._lock:
+            event = self.db.get_event(event_id)
+            # 재전송 차례를 기다리는 사이 사용자가 해제했으면(취소) 보내지 않는다.
+            if event is None or event["notify_state"] == db_mod.NOTIFY_CANCELLED:
+                return
+            if self.notifier.enabled:
+                self.db.set_notify_state(event_id, db_mod.NOTIFY_PENDING)
         if not self.notifier.enabled:
             self.notifier.send(alert_message(event, delayed, self.location))
             self.db.set_notify_state(event_id, db_mod.NOTIFY_DISABLED)
             return
-        self.db.set_notify_state(event_id, db_mod.NOTIFY_PENDING)
         try:
             self.notifier.send(alert_message(event, delayed, self.location))
         except NotifierError as e:
@@ -197,9 +211,22 @@ class ApplicationService:
     def _monitor_loop(self) -> None:
         while not self._stop.wait(self.monitor_interval):
             try:
+                self.check_voice_device(time.monotonic())
                 self.check_devices(time.monotonic(), datetime.now())
             except Exception:
                 log.exception("장치 상태 점검 중 오류")
+
+    def check_voice_device(self, mono_now: float) -> None:
+        """마이크는 음성 확인 때만 쓰이므로, 낙상이 없을 때도 주기적으로 점검한다."""
+        if not self.voice_check_interval:
+            return
+        if self._last_voice_check is not None and mono_now - self._last_voice_check < self.voice_check_interval:
+            return
+        with self._lock:
+            if self.state != NORMAL:  # 음성 확인·경보 중에는 점검하지 않는다
+                return
+        self._last_voice_check = mono_now
+        self.voice.check()
 
     def _send_system(self, kind: str, text: str) -> bool:
         """장치 이상·복구·일일 보고 전송. 성공(또는 알림 미설정)이면 True."""

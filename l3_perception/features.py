@@ -54,9 +54,15 @@ class FeatureExtractor:
 
     하강 속도와 움직임량은 이전 프레임이 필요하므로 최근 기록을 보관한다.
     시간 차는 설정 FPS가 아니라 실제 프레임 시각으로 계산한다.
+
+    하강 속도는 velocity_window초 전 기록과 비교한다. 프레임 수로 비교하면 처리 속도에 따라
+    구간 길이가 달라져(30fps에서 3프레임은 0.1초, 10fps에서는 0.3초) 같은 낙상도 값이 크게 달라진다.
+    velocity_span을 주면 시간 대신 그 프레임 수만큼 앞의 기록과 비교한다(시험용).
     """
 
-    def __init__(self, history_len: int = 15, velocity_span: int = 3):
+    def __init__(self, history_len: int = 15, velocity_window: float = 0.3,
+                 velocity_span: Optional[int] = None):
+        self.velocity_window = velocity_window
         self.velocity_span = velocity_span
         self._hip_y: Deque[Tuple[float, float]] = deque(maxlen=history_len)   # (시각, y)
         self._torso_len: Deque[float] = deque(maxlen=history_len)
@@ -77,8 +83,15 @@ class FeatureExtractor:
         self._torso_len.append(torso_len)
         if len(self._hip_y) < 2:
             return 0.0
-        span = min(self.velocity_span, len(self._hip_y) - 1)
-        t0, y0 = self._hip_y[-1 - span]
+        if self.velocity_span is not None:
+            t0, y0 = self._hip_y[-1 - min(self.velocity_span, len(self._hip_y) - 1)]
+        else:
+            # 구간 시작 시각 이전의 가장 최근 기록. 기록이 그보다 짧으면 가장 오래된 기록.
+            t0, y0 = self._hip_y[0]
+            for ti, yi in reversed(self._hip_y):
+                if ti <= t - self.velocity_window + 1e-6:
+                    t0, y0 = ti, yi
+                    break
         t1, y1 = self._hip_y[-1]
         dt = t1 - t0
         if dt <= 0:

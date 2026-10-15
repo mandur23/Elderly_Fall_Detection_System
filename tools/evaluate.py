@@ -7,6 +7,7 @@
 
     python -m tools.evaluate labels.csv
     python -m tools.evaluate labels.csv --grid DESCENT_VELOCITY_PEAK=1.5,2,2.5 --grid T1_LYING_SECONDS=1,2
+    python -m tools.evaluate labels.csv --hold 3    # 영상이 끝난 뒤 3초 더 누워 있다고 가정
 
 자세 추정은 영상마다 한 번만 하고 특징값을 캐시(--cache)에 저장한다. 임계값 조합(--grid)은
 캐시된 특징값으로 상태 머신만 다시 돌리므로 빠르다. 결과는 --out 폴더에 CSV로 남긴다.
@@ -25,6 +26,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 import config
 
 FeatureSeq = List[Tuple[float, Optional[Dict[str, float]]]]
+FEATURE_VERSION = 2  # 특징 계산 방식이 바뀌면 올려서 이전 캐시를 쓰지 않게 한다
 
 
 @dataclass
@@ -64,15 +66,18 @@ def load_labels(path: Path) -> List[Clip]:
 
 
 def extract_features(video: Path, model: str, cache_dir: Path) -> FeatureSeq:
-    """영상 프레임마다 (영상 시각, 특징값) 목록. 영상 내용·모델이 같으면 캐시를 쓴다."""
+    """영상 프레임마다 (영상 시각, 특징값) 목록. 영상 내용·모델·특징 계산 방식이 같으면 캐시를 쓴다.
+
+    특징값은 캐시되므로 --grid로는 상태 머신 설정만 바꿀 수 있다(DESCENT_VELOCITY_WINDOW_SECONDS 제외).
+    """
     digest = hashlib.sha1(video.read_bytes()).hexdigest()[:16]
-    cache = cache_dir / f"{video.stem}-{model}-{digest}.json"
+    window = config.DESCENT_VELOCITY_WINDOW_SECONDS
+    cache = cache_dir / f"{video.stem}-{model}-{digest}-v{FEATURE_VERSION}-w{window}.json"
     if cache.exists():
         return [(t, f) for t, f in json.loads(cache.read_text(encoding="utf-8"))]
 
     from l3_perception.camera import OpenCVCamera, rotate
-    from l3_perception.fall_detector import load_detector
-    from l3_perception.features import FeatureExtractor
+    from l3_perception.fall_detector import create_extractor, load_detector
 
     cam = OpenCVCamera(str(video), config.FRAME_WIDTH, config.FRAME_HEIGHT)
     cam.open()
@@ -80,7 +85,7 @@ def extract_features(video: Path, model: str, cache_dir: Path) -> FeatureSeq:
     # 실제 장치와 같은 처리 속도를 흉내 내도록 TARGET_FPS에 맞춰 프레임을 건너뛴다.
     step = max(1, round(fps / config.TARGET_FPS))
     detector = load_detector(model)
-    extractor = FeatureExtractor()
+    extractor = create_extractor()
     seq: FeatureSeq = []
     index = 0
     try:
@@ -102,6 +107,20 @@ def extract_features(video: Path, model: str, cache_dir: Path) -> FeatureSeq:
     cache_dir.mkdir(parents=True, exist_ok=True)
     cache.write_text(json.dumps(seq), encoding="utf-8")
     return seq
+
+
+def hold_last(seq: FeatureSeq, seconds: float) -> FeatureSeq:
+    """영상이 끝난 뒤에도 마지막 장면이 그대로 이어진다고 보고 seconds초를 덧붙인다.
+
+    공개 낙상 영상은 넘어지고 1~2초 뒤에 끝나는 경우가 많아 누움 시간(T1)을 채우지 못한다.
+    실제로는 넘어진 사람이 계속 누워 있으므로 이를 흉내 낸다. 움직임이 없으니 하강 속도는 0으로 둔다.
+    """
+    if not seq or seconds <= 0:
+        return seq
+    dt = 1.0 / config.TARGET_FPS
+    t_end, last = seq[-1]
+    still = None if last is None else {**last, "descent_velocity": 0.0}
+    return seq + [(t_end + dt * (k + 1), still) for k in range(int(round(seconds / dt)))]
 
 
 def run_fsm(seq: FeatureSeq) -> Optional[float]:
@@ -169,6 +188,8 @@ def main() -> int:
     parser.add_argument("labels", type=Path)
     parser.add_argument("--model", default=config.POSE_MODEL, choices=["mediapipe", "yolo"])
     parser.add_argument("--grid", action="append", default=[], help="KEY=v1,v2,... (여러 번 지정 가능)")
+    parser.add_argument("--hold", type=float, default=0.0,
+                        help="영상이 끝난 뒤 마지막 장면을 이 시간(초)만큼 더 유지 (짧은 공개 영상용)")
     parser.add_argument("--cache", type=Path, default=config.DATA_DIR / "eval_cache")
     parser.add_argument("--out", type=Path, default=config.DATA_DIR / "eval_results")
     args = parser.parse_args()
@@ -181,7 +202,7 @@ def main() -> int:
     sequences = {}
     for i, clip in enumerate(clips, 1):
         print(f"[{i}/{len(clips)}] 특징 추출: {clip.file.name}", flush=True)
-        sequences[clip.file] = extract_features(clip.file, args.model, args.cache)
+        sequences[clip.file] = hold_last(extract_features(clip.file, args.model, args.cache), args.hold)
 
     args.out.mkdir(parents=True, exist_ok=True)
     summary_rows = []

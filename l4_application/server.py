@@ -34,7 +34,7 @@ def build_service(voice_backend: str = config.VOICE_BACKEND, db_path=config.DB_P
         prompt = PromptPlayer(config.AUDIO_DIR / "ask_status.wav", config.AUDIO_DIR / "chime.wav",
                               config.PROMPT_TEXT)
         voice = VoskVoiceChecker(keywords, config.VOSK_MODEL_PATH, prompt, config.VOICE_SAMPLE_RATE,
-                                 config.MIC_DEVICE)
+                                 config.MIC_DEVICE, config.VOICE_GRAMMAR, config.VOICE_GRAMMAR_MIN_CONF)
     siren = WavSiren(config.AUDIO_DIR / "siren.wav") if config.LOCAL_SIREN and voice_backend != "simulated" else Siren()
     return ApplicationService(
         Database(db_path),
@@ -51,6 +51,7 @@ def build_service(voice_backend: str = config.VOICE_BACKEND, db_path=config.DB_P
         device_alert_after=config.DEVICE_ALERT_AFTER_SECONDS,
         daily_report_time=config.DAILY_REPORT_TIME,
         location=config.DEVICE_NAME,
+        voice_check_interval=config.MIC_CHECK_INTERVAL_SECONDS,
     )
 
 

@@ -50,12 +50,19 @@ KEYPOINT_MIN_CONFIDENCE = 0.5
 
 # --- 낙상 판정 (L3 FSM) ---
 # 하강 속도 단위: 몸통 길이/초 (엉덩이 중심 y 변화량을 몸통 길이로 나눈 값).
-DESCENT_VELOCITY_PEAK = 2.0
+# 하강 속도·누움 시간·아래 두 규칙은 UR Fall 공개 영상 평가로 정했다(docs/EVALUATION.md).
+DESCENT_VELOCITY_PEAK = 1.5
+DESCENT_VELOCITY_WINDOW_SECONDS = 0.3  # 하강 속도를 재는 시간 구간. 프레임 수가 아니라 시간이라 FPS가 달라도 같은 기준
 TORSO_ANGLE_LYING = 60.0      # 수직선 대비 몸통 각도(도) 이상이면 누운 자세
 ASPECT_RATIO_LYING = 1.0      # 몸통이 TORSO_ANGLE_STANDING 이상 기울었고 종횡비가 이 값 이상이어도 누운 자세
 TORSO_ANGLE_STANDING = 40.0   # 몸통 각도가 이 값 미만이면 상체를 세운 것(일어섬)으로 본다
 T1_LYING_SECONDS = 2.0        # 하강 후 누운 자세가 연속으로 유지되어야 하는 시간
 FALLING_TIMEOUT_SECONDS = 5.0 # 하강 후 누움·기립 어느 쪽도 확정되지 않으면 정상 복귀
+# 하강 후 일어선 자세가 이 시간 이상 이어져야 정상 복귀. 쓰러지기 시작한 순간에는 몸통이 아직 서 있기 때문이다.
+STANDING_CONFIRM_SECONDS = 0.5
+# 하강 후 사람이 안 보이면(화면 아래로 벗어남·가구 뒤로 쓰러짐) 누운 것과 같이 본다.
+# 넘어진 뒤 자세 추정이 실패하는 경우가 놓침의 가장 큰 원인이었다. 이후 음성 확인이 한 번 더 거른다.
+MISSING_COUNTS_AS_LYING = True
 
 # --- L3 -> L4 보고 ---
 HEARTBEAT_INTERVAL_SECONDS = 1.0
@@ -74,8 +81,21 @@ VOSK_MODEL_PATH = None  # None이면 data/vosk-model-small-ko
 VOICE_SAMPLE_RATE = 16000
 MIC_DEVICE = None              # sounddevice 입력 장치 번호/이름. None이면 기본 장치
 VOICE_LISTEN_SECONDS = 5.0     # 한 번 질문 후 응답을 듣는 시간
+# 낙상이 없을 때도 이 간격(초)마다 0.3초 녹음해 마이크 입력이 살아 있는지 본다(소리 크기만 확인, 저장·인식 안 함).
+# None 또는 0이면 점검하지 않는다.
+MIC_CHECK_INTERVAL_SECONDS = 600
 VOICE_MAX_ATTEMPTS = 2         # 무응답·불분명 시 재질문 포함 최대 시도 횟수
 PROMPT_TEXT = "괜찮으신가요? 괜찮으시면 '괜찮아요'라고 말씀하시거나 화면 아래 버튼을 눌러 주세요."
+
+# 자유 인식에 더해 응답 문구로 제한한 인식(문법)을 한다. 단어는 Vosk 한국어 소형 모델(0.22)의 어휘
+# 단위로 띄어 쓴다('괜찮아요'는 어휘에 없고 '괜찮 아요'로 있다). 모델을 바꾸면 어휘를 다시 확인한다.
+# 문법 인식은 엉뚱한 말도 가장 가까운 문구로 바꾸므로 모든 단어 신뢰도가 VOICE_GRAMMAR_MIN_CONF 이상일
+# 때만 쓴다. 0.9는 합성 음성 시험(docs/EVALUATION.md)으로 정한 초기값이며 실제 목소리로 다시 확인한다.
+# 빈 목록이면 자유 인식만 쓴다.
+VOICE_GRAMMAR = ["괜찮아", "괜찮 아요", "네 괜찮 아요", "괜찮 아", "일어났 어요", "문제 없어요",
+                 "안 괜찮 아요", "안 괜찮아", "도 와 주세요", "도와줘", "살려 주세요", "살려줘",
+                 "아파", "아파 요", "구급차", "구급차 불러 주세요", "여기", "네", "예", "응", "아니", "아니요"]
+VOICE_GRAMMAR_MIN_CONF = 0.9
 
 # 부정 표현은 '괜찮아'보다 먼저 검사한다 ("안 괜찮아요" -> 도움 요청).
 KEYWORDS_NEGATED_SAFE = ["안괜찮", "안괜찬", "괜찮지않", "괜찮지안"]

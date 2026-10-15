@@ -18,8 +18,9 @@ fi
 
 echo "[1/8] 시스템 패키지"
 sudo apt-get update
+# fonts-nanum: 현장 화면(Chromium)과 자세 추정 데모의 한글 표시
 sudo apt-get install -y python3-venv python3-dev python3-picamera2 libportaudio2 \
-  alsa-utils espeak-ng curl unzip chromium-browser
+  alsa-utils espeak-ng curl unzip chromium-browser fonts-nanum
 
 echo "[2/8] 가상환경과 파이썬 패키지"
 # picamera2는 apt 패키지라 시스템 패키지를 볼 수 있는 가상환경을 만든다.

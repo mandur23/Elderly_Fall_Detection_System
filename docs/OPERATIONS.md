@@ -14,7 +14,7 @@ bash l2_system/setup_pi.sh
 
 | 단계 | 내용 |
 | --- | --- |
-| 시스템 패키지 | picamera2, PortAudio, espeak-ng, Chromium 등 |
+| 시스템 패키지 | picamera2, PortAudio, espeak-ng, Chromium, 한글 글꼴(나눔) 등 |
 | 파이썬 환경 | `.venv` (picamera2 사용을 위해 시스템 패키지 공유) |
 | 모델 | MediaPipe 자세 모델(`assets/models/`), Vosk 한국어 모델(`data/`) |
 | 소리 | 알림음·경보음 생성 (`python -m tools.make_sounds`) |
@@ -34,7 +34,8 @@ bash l2_system/setup_pi.sh
 
 카메라 위치는 다음을 권장합니다(시험 후 갱신).
 
-- 방 전체와 바닥이 보이도록 높은 곳에서 비스듬히 내려다보게 설치
+- 방 전체와 바닥이 보이도록 높은 곳에서 비스듬히 내려다보게 설치. 공개 영상 평가에서 카메라가 낮으면(약 1m) 카메라 쪽으로 넘어진 사람이 화면 아래로 잘려 자세 추정이 실패했습니다([성능 평가 기록](EVALUATION.md)).
+- 설치 후 `python -m tools.pose_demo`로 사람이 서 있을 때와 바닥에 누웠을 때 모두 관절이 잡히는지 확인
 - 역광(창문 정면)을 피하고, 밤에도 사람 윤곽이 보일 정도의 조명 유지
 - 카메라를 돌려 설치했다면 `CAMERA_ROTATION` 설정
 
@@ -55,6 +56,8 @@ journalctl --user -u fall-app -u fall-detect -f
 | 상황 | 현장 화면 | 보호자 알림 |
 | --- | --- | --- |
 | 감지 프로그램 무응답, 카메라·모델·마이크 오류 | 회색 '장치 점검 필요'와 원인 | `DEVICE_ALERT_AFTER_SECONDS`(기본 180초) 이상 지속 시 '장치 이상', 복구 시 '정상 복구' |
+| 마이크 고장·음소거 (낙상이 없을 때) | 위와 같음 | `MIC_CHECK_INTERVAL_SECONDS`(기본 600초)마다 0.3초 녹음해 소리 크기만 확인(저장·인식 안 함) |
+| 서비스 재시작 | 해제되지 않은 경보는 다시 경보 화면 | 전송 도중 끊긴 경보 알림을 다시 보냄(지연 전송 표시) |
 | 알림 전송 실패 | 경보 화면에 '전송 실패, 자동 재전송' | 30초·2분·10분 간격으로 재시도, 지연 전송 표시 |
 | 정상 동작 확인 | - | `DAILY_REPORT_TIME` 설정 시 매일 상태 보고 |
 

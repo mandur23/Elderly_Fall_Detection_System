@@ -74,7 +74,7 @@ def alert_message(event: Dict, delayed: bool = False, location: str = "") -> str
         f"판정: {RESULT_LABELS.get(event['result'], event['result'])}",
     ]
     if delayed:
-        lines.append("통신 장애로 늦게 전달된 알림입니다. 발생 시각을 확인해 주세요.")
+        lines.append("통신 장애나 장치 재시작으로 늦게 전달된 알림입니다. 발생 시각을 확인해 주세요.")
     lines.append("현장 상태를 확인해 주세요. 이 알림은 보조 수단이며 응급 신고를 대신하지 않습니다.")
     return "\n".join(lines)
 

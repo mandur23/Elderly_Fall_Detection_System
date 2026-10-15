@@ -126,6 +126,32 @@ class Database:
                             (INTERRUPTED, now_iso()))
         return cur.rowcount
 
+    def requeue_pending_notifications(self) -> int:
+        """재시작 시 전송 중(pending)으로 남은 경보 알림을 재전송 대기로 돌린다.
+
+        전송이 끝났는지 알 수 없으므로 다시 보낸다(중복이 누락보다 낫다).
+        이미 현장에서 해제된 이벤트는 재시도하지 않는다.
+        """
+        with self._lock, self._conn:
+            self._conn.execute(
+                "UPDATE events SET notify_state = ?, notify_next_at = NULL "
+                "WHERE notify_state = ? AND cleared_by IS NOT NULL",
+                (NOTIFY_CANCELLED, NOTIFY_PENDING),
+            )
+            cur = self._conn.execute(
+                "UPDATE events SET notify_state = ?, notify_next_at = NULL WHERE notify_state = ?",
+                (NOTIFY_FAILED, NOTIFY_PENDING),
+            )
+        return cur.rowcount
+
+    def unfinished_alarm(self) -> Optional[Dict]:
+        """경보가 났지만 아직 해제되지 않은 가장 최근 이벤트."""
+        rows = self._query(
+            "SELECT * FROM events WHERE result IN (?, ?, ?) AND ended_at IS NULL ORDER BY id DESC LIMIT 1",
+            ALERT_RESULTS,
+        )
+        return rows[0] if rows else None
+
     def purge_older_than(self, days: int) -> int:
         cutoff = (datetime.now() - timedelta(days=days)).isoformat(timespec="milliseconds")
         cur = self._execute(

@@ -42,6 +42,21 @@ class FeatureTest(unittest.TestCase):
         v_far = far.extract(kp(320, torso=50), 0.1)["descent_velocity"]
         self.assertAlmostEqual(v_near, v_far, places=2)
 
+    def test_velocity_window_is_time_based(self):
+        # 0.5~0.6초에 60px 떨어지는 움직임. 프레임 수로 재면 30fps(0.1초 구간)와 10fps(0.3초 구간)의
+        # 값이 세 배 차이 나지만, 0.3초 구간으로 재면 처리 속도와 상관없이 같다.
+        def peak(fps):
+            ex = FeatureExtractor(velocity_window=0.3)
+            values = []
+            for i in range(int(fps) + 1):
+                t = i / fps
+                y = 300 + 600 * min(max(t - 0.5, 0.0), 0.1)
+                values.append(ex.extract(kp(y), t)["descent_velocity"])
+            return max(values)
+
+        self.assertAlmostEqual(peak(30), 2.0, places=2)
+        self.assertAlmostEqual(peak(10), 2.0, places=2)
+
     def test_reference_torso_survives_lying(self):
         ex = FeatureExtractor(velocity_span=1)
         ex.extract(kp(300, torso=100), 0.0)

@@ -126,6 +126,18 @@ class ServiceTest(unittest.TestCase):
         self.assertEqual(ev["cleared_by"], "BUTTON")
         self.assertEqual(self.svc.db.due_retries(), [])
 
+    def test_retry_skipped_when_cleared_while_waiting(self):
+        self.notifier.fail = True
+        eid = self.svc.report_suspect({})
+        self.assertTrue(wait_until(lambda: self.event(eid)["notify_state"] == dbm.NOTIFY_FAILED))
+        due = self.svc.db.due_retries()  # 재전송 루프가 대상 목록을 읽은 직후
+        self.svc.clear_by_button()       # 사용자가 현장에서 해제
+        self.notifier.fail = False
+        for ev in due:
+            self.svc._send_alert(ev["id"], delayed=True)
+        self.assertEqual(self.notifier.sent, [])
+        self.assertEqual(self.event(eid)["notify_state"], dbm.NOTIFY_CANCELLED)
+
     def test_clear_after_sent_notification_sends_clear_message(self):
         eid = self.svc.report_suspect({})
         self.assertTrue(wait_until(lambda: self.event(eid)["notify_state"] == dbm.NOTIFY_SENT))
@@ -149,6 +161,29 @@ class ServiceTest(unittest.TestCase):
         eid = self.svc.db.insert_event("FALL_SUSPECT", {})
         self.svc.start()
         self.assertEqual(self.event(eid)["result"], dbm.INTERRUPTED)
+
+    def pending_alarm(self):
+        """경보 알림을 보내는 도중 프로세스가 종료된 이벤트."""
+        eid = self.svc.db.insert_event("FALL_SUSPECT", {})
+        self.svc.db.set_result(eid, dbm.ALERT_NO_REPLY, "NO_REPLY", ended=False)
+        self.svc.db.set_notify_state(eid, dbm.NOTIFY_PENDING)
+        return eid
+
+    def test_restart_resends_alert_left_pending(self):
+        eid = self.pending_alarm()
+        self.svc.retry_check_seconds = 0.05
+        self.svc.start()
+        self.assertTrue(wait_until(lambda: self.event(eid)["notify_state"] == dbm.NOTIFY_SENT))
+        self.assertEqual(self.event(eid)["result"], dbm.ALERT_NO_REPLY)
+        self.assertEqual(len(self.notifier.sent), 1)
+        self.assertIn("지연 전송", self.notifier.sent[0])
+
+    def test_restart_does_not_resend_alert_cleared_on_site(self):
+        eid = self.pending_alarm()
+        self.svc.db.close_event(eid, "BUTTON")
+        self.svc.start()
+        self.assertEqual(self.event(eid)["notify_state"], dbm.NOTIFY_CANCELLED)
+        self.assertEqual(self.svc.db.due_retries(), [])
 
     def test_device_problems(self):
         self.assertIn("영상 감지 프로그램이 응답하지 않습니다", self.svc.get_status()["problems"])

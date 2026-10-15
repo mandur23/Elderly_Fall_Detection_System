@@ -1,9 +1,10 @@
-"""장치 이상 알림, 일일 보고, 현장 경보음, 내부 API 키, 설정 덮어쓰기 테스트."""
+"""장치 이상 알림, 일일 보고, 현장 경보음, 재시작 복구, 마이크 점검, 내부 API 키, 설정 덮어쓰기 테스트."""
 
 import os
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from datetime import datetime
@@ -16,7 +17,8 @@ from l4_application import database as dbm
 from l4_application.audio import Siren
 from l4_application.database import Database
 from l4_application.server import create_app
-from tests.test_app_service import FakeNotifier, make_service, wait_until
+from l4_application.voice_checker import VoiceChecker, VoskVoiceChecker
+from tests.test_app_service import KEYWORDS, FakeNotifier, make_service, wait_until
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -119,6 +121,83 @@ class SirenTest(unittest.TestCase):
         self.assertFalse(siren.playing)
         time.sleep(0.2)
         svc.stop()
+        svc.db.close()
+        tmp.cleanup()
+
+
+class RestartAlarmTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.db = Database(Path(self.tmp.name) / "e.db")
+        self.eid = self.db.insert_event("FALL_SUSPECT", {})
+        self.db.set_result(self.eid, dbm.ALERT_NO_REPLY, "NO_REPLY", ended=False)
+        self.db.set_notify_state(self.eid, dbm.NOTIFY_SENT)
+        self.svc, _ = make_service(self.db, FakeNotifier())
+        self.svc.siren = self.siren = FakeSiren()
+
+    def tearDown(self):
+        time.sleep(0.2)  # 해제 알림 전송 스레드가 끝난 뒤 닫는다
+        self.svc.stop()
+        self.db.close()
+        self.tmp.cleanup()
+
+    def test_uncleared_alarm_is_restored_after_restart(self):
+        self.svc.start()
+        self.assertEqual((self.svc.state, self.svc.event_id), ("ALARM", self.eid))
+        self.assertTrue(self.siren.playing)
+        self.assertTrue(self.svc.clear_by_button())
+        self.assertEqual(self.db.get_event(self.eid)["cleared_by"], "BUTTON")
+        self.assertIsNone(self.db.unfinished_alarm())
+
+    def test_cleared_alarm_is_not_restored(self):
+        self.db.close_event(self.eid, "BUTTON")
+        self.svc.start()
+        self.assertEqual(self.svc.state, "NORMAL")
+        self.assertFalse(self.siren.playing)
+
+
+class FakeMicVosk(VoskVoiceChecker):
+    """모델·마이크 없이 점검 로직만 시험한다."""
+
+    def __init__(self):
+        VoiceChecker.__init__(self, KEYWORDS)
+        self.model, self.sample_rate, self.mic_device = object(), 16000, None
+        self._busy = threading.Lock()
+        self.audio = np.zeros(10, dtype=np.int16)
+        self.records = 0
+
+    def _record(self, seconds):
+        self.records += 1
+        return self.audio
+
+
+class MicCheckTest(unittest.TestCase):
+    def test_silent_mic_is_reported_and_recovery_clears(self):
+        mic = FakeMicVosk()
+        mic.check()
+        self.assertFalse(mic.ok)
+        mic.audio = np.array([0, 5, -3], dtype=np.int16)
+        mic.check()
+        self.assertTrue(mic.ok)
+
+    def test_check_is_skipped_while_listening(self):
+        mic = FakeMicVosk()
+        with mic._busy:
+            mic.check()
+        self.assertEqual(mic.records, 0)
+
+    def test_service_checks_mic_periodically_only_when_idle(self):
+        tmp = tempfile.TemporaryDirectory()
+        svc, voice = make_service(Database(Path(tmp.name) / "e.db"), FakeNotifier())
+        calls = []
+        voice.check = lambda: calls.append(1)
+        svc.voice_check_interval = 600
+        for t in (0.0, 100.0, 600.0):
+            svc.check_voice_device(t)
+        self.assertEqual(len(calls), 2)
+        svc.state = "SUSPECT"  # 음성 확인 중에는 마이크를 건드리지 않는다
+        svc.check_voice_device(1300.0)
+        self.assertEqual(len(calls), 2)
         svc.db.close()
         tmp.cleanup()
 

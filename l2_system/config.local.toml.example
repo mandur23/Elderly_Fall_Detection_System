@@ -15,5 +15,8 @@ DEVICE_ALERT_AFTER_SECONDS = 180
 # 매일 상태 보고 시각 (사용하지 않으려면 주석 처리)
 # DAILY_REPORT_TIME = "09:00"
 
+# 마이크 주기 점검 간격(초). 0.3초 녹음해 소리 크기만 본다. 사용하지 않으려면 0
+# MIC_CHECK_INTERVAL_SECONDS = 600
+
 # 이벤트 보관 기간(일). 보관 정책을 정한 뒤 설정
 # EVENT_RETENTION_DAYS = 90

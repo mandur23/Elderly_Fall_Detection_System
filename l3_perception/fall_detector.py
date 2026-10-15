@@ -34,7 +34,13 @@ def create_fsm(on_state_change=None) -> FallFSM:
         aspect_lying=config.ASPECT_RATIO_LYING,
         angle_standing=config.TORSO_ANGLE_STANDING,
         on_state_change=on_state_change,
+        standing_confirm=config.STANDING_CONFIRM_SECONDS,
+        missing_counts_as_lying=config.MISSING_COUNTS_AS_LYING,
     )
+
+
+def create_extractor() -> FeatureExtractor:
+    return FeatureExtractor(velocity_window=config.DESCENT_VELOCITY_WINDOW_SECONDS)
 
 
 def load_detector(model: str) -> PoseDetector:
@@ -50,7 +56,7 @@ class FrameAnalyzer:
 
     def __init__(self, detector: PoseDetector, on_state_change=None):
         self.detector = detector
-        self.extractor = FeatureExtractor()
+        self.extractor = create_extractor()
         self.fsm = create_fsm(on_state_change)
 
     def process(self, frame, t: float) -> Tuple[Optional[Keypoints], Optional[Dict[str, float]], FallState]:

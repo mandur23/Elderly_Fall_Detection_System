@@ -77,5 +77,54 @@ class FsmTest(unittest.TestCase):
         self.assertEqual(self.fsm.state, FallState.FALLING)
 
 
+class FsmFallRulesTest(unittest.TestCase):
+    """UR Fall 평가로 추가한 규칙: 일어섬 확인 시간, 하강 후 사라짐을 누움으로 보기."""
+
+    def make(self, **kw):
+        return FallFSM(descent_peak=2.0, t1_lying_seconds=2.0, falling_timeout=5.0,
+                       angle_lying=60, aspect_lying=1.0, angle_standing=40, **kw)
+
+    def test_upright_moment_at_fall_start_does_not_cancel(self):
+        # 쓰러지기 시작한 순간에는 몸통이 아직 서 있다
+        fsm = self.make(standing_confirm=0.5)
+        fsm.update(PEAK_UPRIGHT, now=0.0)
+        fsm.update(STAND, now=0.125)
+        fsm.update(LYING, now=0.25)
+        self.assertEqual(fsm.state, FallState.FALLING)
+        fsm.update(LYING, now=2.25)
+        self.assertEqual(fsm.state, FallState.SUSPECT)
+
+    def test_standing_for_confirm_time_returns_normal(self):
+        fsm = self.make(standing_confirm=0.5)
+        fsm.update(PEAK_UPRIGHT, now=0.0)
+        fsm.update(STAND, now=0.25)
+        self.assertEqual(fsm.state, FallState.FALLING)
+        fsm.update(STAND, now=0.75)
+        self.assertEqual(fsm.state, FallState.NORMAL)
+
+    def test_missing_after_descent_counts_as_lying(self):
+        fsm = self.make(missing_counts_as_lying=True)
+        fsm.update(PEAK_LYING, now=0.0)
+        fsm.update(None, now=1.0)  # 화면 아래로 벗어나 자세 추정 실패
+        self.assertEqual(fsm.state, FallState.FALLING)
+        fsm.update(None, now=2.0)
+        self.assertEqual(fsm.state, FallState.SUSPECT)
+        self.assertIsNone(fsm.suspect_features)
+
+    def test_missing_without_descent_stays_normal(self):
+        fsm = self.make(missing_counts_as_lying=True)
+        for t in range(10):  # 화면 밖으로 걸어 나간 경우
+            fsm.update(None, now=t)
+        self.assertEqual(fsm.state, FallState.NORMAL)
+
+    def test_bent_posture_still_resets_lying_time(self):
+        fsm = self.make(missing_counts_as_lying=True)
+        fsm.update(PEAK_LYING, now=0.0)
+        fsm.update(None, now=1.5)
+        fsm.update(BENT, now=1.8)  # 누움도 사라짐도 아님 -> T1 다시 측정
+        fsm.update(LYING, now=2.1)
+        self.assertEqual(fsm.state, FallState.FALLING)
+
+
 if __name__ == "__main__":
     unittest.main()

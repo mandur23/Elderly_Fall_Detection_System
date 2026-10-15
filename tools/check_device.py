@@ -137,20 +137,17 @@ class Checker:
         return OK, detail
 
     def speech_recognition(self):
-        from vosk import KaldiRecognizer, Model, SetLogLevel
-        import json
-        SetLogLevel(-1)
-        if not config.VOSK_MODEL_PATH.exists():
-            return FAIL, f"Vosk 모델 없음: {config.VOSK_MODEL_PATH}"
-        model = Model(str(config.VOSK_MODEL_PATH))
+        # 실제 음성 확인과 같은 경로(자유 인식 + 응답 문구 제한 인식)로 확인한다.
+        from l4_application.voice_checker import VoskVoiceChecker
+        keywords = (config.KEYWORDS_NEGATED_SAFE, config.KEYWORDS_HELP, config.KEYWORDS_SAFE)
+        checker = VoskVoiceChecker(keywords, config.VOSK_MODEL_PATH, None, config.VOICE_SAMPLE_RATE,
+                                   config.MIC_DEVICE, config.VOICE_GRAMMAR, config.VOICE_GRAMMAR_MIN_CONF)
+        if not checker.ok:
+            return FAIL, checker.error
         if getattr(self, "recording", None) is None:
             return OK, "모델 로드됨 (녹음이 없어 인식은 건너뜀)"
-        rec = KaldiRecognizer(model, config.VOICE_SAMPLE_RATE)
-        rec.AcceptWaveform(self.recording.tobytes())
-        text = json.loads(rec.FinalResult()).get("text", "")
-        from l4_application.voice_checker import classify
-        kind = classify(text, config.KEYWORDS_NEGATED_SAFE, config.KEYWORDS_HELP, config.KEYWORDS_SAFE)
-        return (OK if kind == "SAFE" else WARN), f"인식 '{text}' -> {kind}"
+        kind, text = checker.recognize(self.recording.tobytes())
+        return (OK if kind == "SAFE" else WARN), f"인식 '{text or ''}' -> {kind}"
 
     def telegram(self):
         if not (config.TELEGRAM_BOT_TOKEN and config.TELEGRAM_CHAT_ID):

@@ -5,7 +5,10 @@ L3는 SUSPECT를 보고한 뒤 L4가 이벤트를 끝냈다고 알려 줄 때(re
 이렇게 해야 두 프로세스의 상태가 어긋나지 않고 같은 상황에서 알림이 반복되지 않는다.
 
     NORMAL --하강 속도 피크--> FALLING --누운 자세 T1 연속 유지--> SUSPECT --reset()--> NORMAL
-                                  |--다시 일어섬 / 시간 초과--> NORMAL
+                                  |--일어선 자세 standing_confirm초 유지 / 시간 초과--> NORMAL
+
+missing_counts_as_lying이 켜져 있으면 FALLING 중 사람이 안 보이는 프레임도 누운 자세로 센다.
+넘어지면서 화면 아래로 벗어나거나 가구 뒤로 가려져 자세 추정이 실패하는 경우를 놓치지 않기 위함이다.
 """
 
 from enum import Enum
@@ -31,6 +34,8 @@ class FallFSM:
         aspect_lying: float,
         angle_standing: float,
         on_state_change: Optional[StateCallback] = None,
+        standing_confirm: float = 0.0,
+        missing_counts_as_lying: bool = False,
     ):
         self.descent_peak = descent_peak
         self.t1 = t1_lying_seconds
@@ -39,10 +44,13 @@ class FallFSM:
         self.aspect_lying = aspect_lying
         self.angle_standing = angle_standing
         self.on_state_change = on_state_change
+        self.standing_confirm = standing_confirm
+        self.missing_counts_as_lying = missing_counts_as_lying
 
         self.state = FallState.NORMAL
         self.state_since = 0.0
         self.lying_since: Optional[float] = None
+        self.standing_since: Optional[float] = None
         self.suspect_features: Optional[Dict[str, float]] = None
 
     def is_lying(self, f: Dict[str, float]) -> bool:
@@ -62,6 +70,7 @@ class FallFSM:
             return
         self.state = new_state
         self.state_since = now
+        self.standing_since = None
         if new_state != FallState.FALLING:
             self.lying_since = None
         if self.on_state_change:
@@ -80,18 +89,26 @@ class FallFSM:
 
         elif self.state == FallState.FALLING:
             if features is not None and self.is_standing(features):
-                self._transition(FallState.NORMAL, now, features)
-            elif features is not None and self.is_lying(features):
-                if self.lying_since is None:
-                    self.lying_since = now
-                elif now - self.lying_since >= self.t1:
-                    self.suspect_features = dict(features)
-                    self._transition(FallState.SUSPECT, now, features)
+                self.lying_since = None
+                if self.standing_since is None:
+                    self.standing_since = now
+                if now - self.standing_since >= self.standing_confirm:
+                    self._transition(FallState.NORMAL, now, features)
+                    return self.state
             else:
+                self.standing_since = None
+                lying = self.is_lying(features) if features is not None else self.missing_counts_as_lying
+                if lying:
+                    if self.lying_since is None:
+                        self.lying_since = now
+                    elif now - self.lying_since >= self.t1:
+                        self.suspect_features = dict(features) if features is not None else None
+                        self._transition(FallState.SUSPECT, now, features)
+                    return self.state
                 # 누운 자세가 끊기면 T1을 처음부터 다시 잰다.
                 self.lying_since = None
-                if now - self.state_since >= self.falling_timeout:
-                    self._transition(FallState.NORMAL, now, features)
+            if now - self.state_since >= self.falling_timeout:
+                self._transition(FallState.NORMAL, now, features)
 
         # SUSPECT는 L4의 reset() 호출로만 빠져나간다.
         return self.state

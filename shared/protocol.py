@@ -15,7 +15,10 @@
 텍스트 메시지 = JSON {"type": ..., ...}. 종류별 필수 항목은 REQUIRED 참고.
 """
 
+import hashlib
+import hmac
 import json
+import math
 import struct
 from typing import Any, Dict, Tuple
 
@@ -25,6 +28,7 @@ WS_PATH = "/ws/device"
 KIOSK_PATH = "/kiosk"          # 서버가 제공하는 현장 화면. edge의 Chromium이 연다
 HEALTH_PATH = "/api/health"    # 서버가 떠 있으면 200. edge가 현장 화면을 열기 전에 기다릴 때 쓴다
 AUTH_HEADER = "Authorization"  # 값: "Bearer <DEVICE_TOKEN>"
+KIOSK_KEY_HEADER = "X-Kiosk-Key"  # 현장 화면이 API를 부를 때 붙이는 장치별 키 (kiosk_key)
 
 # --- 바이너리 메시지 ---
 VIDEO = 0x01
@@ -99,6 +103,8 @@ def unpack(data: bytes) -> Tuple[int, float, bytes]:
     kind, timestamp = _HEADER.unpack_from(data)
     if kind not in BINARY_KINDS:
         raise ProtocolError(f"알 수 없는 바이너리 종류: {kind}")
+    if not math.isfinite(timestamp):
+        raise ProtocolError(f"시각이 올바르지 않습니다: {timestamp}")
     return kind, timestamp, bytes(data[HEADER_SIZE:])
 
 
@@ -131,6 +137,12 @@ def _check(type_: Any, fields: Dict[str, Any]) -> None:
 def bearer(token: str) -> Dict[str, str]:
     """핸드셰이크 헤더."""
     return {AUTH_HEADER: f"Bearer {token}"}
+
+
+def kiosk_key(device_token: str, device_id: str) -> str:
+    """장치별 현장 화면 키. 현장 화면 주소(/kiosk?device=<id>&key=<키>)에 넣어, 그 장치의 상태 보기와
+    '괜찮아요' 해제를 그 화면에만 허락한다. 토큰을 아는 edge와 서버가 각자 같은 값을 계산한다."""
+    return hmac.new(device_token.encode(), f"kiosk:{device_id}".encode(), hashlib.sha256).hexdigest()[:32]
 
 
 def token_from_header(value: str) -> str:

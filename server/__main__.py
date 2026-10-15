@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import logging
-import os
 import sys
 from pathlib import Path
 
@@ -39,9 +38,6 @@ def main(argv=None) -> int:
                   "DEVICE_TOKEN에 라즈베리파이와 같은 값을 넣어 주세요.")
         return 2
 
-    # MediaPipe(TensorFlow Lite)의 내부 경고 로그를 줄인다.
-    os.environ.setdefault("GLOG_minloglevel", "2")
-    os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")
     server = FallServer(settings)
     log.info("서버 시작: http://%s:%d (현장 화면 /kiosk, edge 접속 /ws/device)", settings.host, settings.port)
     web.run_app(server.app, host=settings.host, port=settings.port, access_log=None, print=None)

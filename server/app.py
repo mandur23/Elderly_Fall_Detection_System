@@ -20,7 +20,7 @@ import html
 import json
 import logging
 import time
-from typing import Awaitable, Callable, Dict, List, Optional
+from typing import Dict, List, Optional
 
 from aiohttp import WSMsgType, web
 

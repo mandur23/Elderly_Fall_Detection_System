@@ -1,0 +1,174 @@
+/* 관리자 화면: 여러 장치 상태를 한눈에. 상태 색은 현장 화면과 같다. */
+:root {
+  --bg: #f4f6f7;
+  --panel: #ffffff;
+  --text: #1c2833;
+  --muted: #55606b;  /* 밝은 바탕에서도 명암비 4.5:1 이상 */
+  --line: #dde3e8;
+  --normal: #1e8449;
+  --suspect: #d4ac0d;
+  --alarm: #b03a2e;
+  --check: #8a5a00;  /* 흰 글씨가 잘 보이는 어두운 호박색 (현장 화면과 같음) */
+  --off: #566573;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  font-family: "Pretendard", "Noto Sans KR", "Noto Sans CJK KR", "Malgun Gothic", sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 15px;
+  line-height: 1.5;
+}
+
+.muted { color: var(--muted); }
+.hidden { display: none !important; }
+
+.bar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 16px;
+  padding: 14px 24px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+  position: sticky;
+  top: 0;
+  z-index: 2;
+}
+.brand { display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap; }
+.brand h1 { font-size: 1.3rem; }
+.bar-right { display: flex; align-items: center; gap: 14px; }
+.badge { background: #fdebd0; color: #7e5109; border-radius: 999px; padding: 2px 10px; font-size: 0.85rem; }
+.link-btn { background: none; border: none; color: var(--muted); cursor: pointer; font: inherit; text-decoration: underline; }
+
+.banner { margin: 12px 24px 0; padding: 12px 16px; border-radius: 10px; font-weight: 700; list-style: none; }
+.banner.alarm { background: var(--alarm); color: #fff; animation: pulse 1.2s ease-in-out infinite; }
+.banner.offline { background: var(--off); color: #fff; }
+.banner.check { background: #fdebd0; color: #7e5109; font-weight: 600; }
+@keyframes pulse { 50% { opacity: 0.75; } }
+
+main { padding: 16px 24px 32px; display: flex; flex-direction: column; gap: 22px; }
+h2 { font-size: 1.05rem; margin-bottom: 10px; }
+
+.summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; }
+.tile {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-left: 6px solid var(--off);
+  border-radius: 10px;
+  padding: 12px 16px;
+  display: flex;
+  flex-direction: column;
+}
+.tile strong { font-size: 1.8rem; }
+.tile-label { color: var(--muted); font-size: 0.9rem; }
+.tile.alarm { border-left-color: var(--alarm); }
+.tile.suspect { border-left-color: var(--suspect); }
+.tile.check { border-left-color: var(--check); }
+.tile.alarm.on { background: #fadbd8; }
+
+/* 폭이 320px보다 좁은 휴대폰에서도 카드가 화면 밖으로 넘치지 않게 min()을 쓴다 */
+.devices { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(320px, 100%), 1fr)); gap: 14px; }
+.card {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-top: 8px solid var(--off);
+  border-radius: 12px;
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.card.view-normal { border-top-color: var(--normal); }
+.card.view-suspect { border-top-color: var(--suspect); }
+.card.view-alarm { border-top-color: var(--alarm); box-shadow: 0 0 0 3px rgba(176, 58, 46, 0.25); }
+.card.view-check { border-top-color: var(--check); }
+.card > header { display: flex; justify-content: space-between; align-items: flex-start; gap: 10px; }
+.card h3 { font-size: 1.15rem; }
+.card .id { font-size: 0.8rem; }
+.state-badge { border-radius: 999px; padding: 3px 12px; font-weight: 700; font-size: 0.9rem; color: #fff; background: var(--off); white-space: nowrap; }
+.view-normal .state-badge { background: var(--normal); }
+.view-suspect .state-badge { background: var(--suspect); color: #1c1c1c; }
+.view-alarm .state-badge { background: var(--alarm); }
+.view-check .state-badge { background: var(--check); }
+.detail { font-weight: 600; min-height: 1.5em; }
+
+.checks { list-style: none; display: flex; gap: 8px; flex-wrap: wrap; }
+.checks li { border-radius: 6px; padding: 1px 8px; font-size: 0.85rem; background: #eaf2f8; color: var(--muted); }
+.checks li.ok { background: #d5f5e3; color: #145a32; }
+.checks li.bad { background: #fadbd8; color: #78281f; font-weight: 700; }
+.checks li.ok::before { content: "✓ "; }
+.checks li.bad::before { content: "✗ "; }
+
+.stats { display: grid; grid-template-columns: auto 1fr; gap: 2px 12px; font-size: 0.9rem; }
+.stats dt { color: var(--muted); }
+
+.card .problems { list-style: none; font-size: 0.9rem; color: #78281f; }
+.card .problems li::before { content: "• "; }
+
+.card footer { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 10px; margin-top: auto; }
+.card footer button { margin-left: auto; }
+.kiosk-link { color: var(--muted); font-size: 0.9rem; }
+.clear-btn {
+  border: none;
+  border-radius: 8px;
+  padding: 8px 14px;
+  background: var(--alarm);
+  color: #fff;
+  font: inherit;
+  font-weight: 700;
+  cursor: pointer;
+}
+.clear-btn:disabled { opacity: 0.6; cursor: default; }
+.forget-btn {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 6px 12px;
+  background: none;
+  color: var(--muted);
+  font: inherit;
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+.forget-btn:hover { color: var(--text); border-color: var(--muted); }
+.forget-btn:disabled { opacity: 0.6; cursor: default; }
+
+.columns { display: grid; grid-template-columns: 2fr 1fr; gap: 18px; }
+@media (max-width: 900px) { .columns { grid-template-columns: 1fr; } }
+
+table.events { width: 100%; border-collapse: collapse; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+.events th, .events td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); font-size: 0.9rem; }
+.events th { background: #eef2f4; color: var(--muted); font-weight: 600; }
+.events tr.alarm td:nth-child(3) { color: var(--alarm); font-weight: 700; }
+
+.system { list-style: none; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 8px 12px; }
+.system li { padding: 6px 0; border-bottom: 1px solid var(--line); font-size: 0.9rem; white-space: pre-line; }
+.system li:last-child { border-bottom: none; }
+
+.note { color: var(--muted); font-size: 0.85rem; }
+.small { font-size: 0.85rem; font-weight: 400; }
+
+.guardian-form { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; display: flex; flex-direction: column; gap: 10px; }
+.guardian-form h3 { font-size: 1rem; }
+.guardian-form label { display: flex; flex-direction: column; gap: 4px; font-size: 0.9rem; color: var(--muted); }
+.guardian-form label.check { flex-direction: row; align-items: center; gap: 8px; color: var(--text); }
+.guardian-form input:not([type=checkbox]) { font: inherit; color: var(--text); padding: 7px 10px; border: 1px solid var(--line); border-radius: 8px; }
+.guardian-form fieldset { border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; display: flex; flex-direction: column; gap: 6px; }
+.guardian-form legend { font-size: 0.9rem; color: var(--muted); padding: 0 4px; }
+#guardian-devices { display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: 0.9rem; }
+#guardian-devices label { flex-direction: row; align-items: center; gap: 6px; color: var(--text); }
+.form-actions { display: flex; gap: 12px; align-items: center; }
+.primary { font: inherit; font-weight: 700; border: none; border-radius: 8px; padding: 8px 18px; background: var(--normal); color: #fff; cursor: pointer; }
+.error { color: var(--alarm); font-weight: 600; font-size: 0.9rem; }
+.row-actions { white-space: nowrap; }
+.row-actions button { background: none; border: none; color: var(--muted); text-decoration: underline; cursor: pointer; font: inherit; font-size: 0.85rem; margin-left: 8px; }
+
+/* 로그인·거절 화면 */
+.center-box { max-width: 420px; margin: 12vh auto; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 28px; display: flex; flex-direction: column; gap: 14px; }
+.center-box h1 { font-size: 1.3rem; }
+.center-box input { font: inherit; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; }
+.center-box button { font: inherit; font-weight: 700; padding: 10px; border: none; border-radius: 8px; background: var(--normal); color: #fff; cursor: pointer; }
+.center-box .error { color: var(--alarm); font-weight: 600; }
+.center-box code { background: #eef2f4; border-radius: 4px; padding: 1px 6px; }

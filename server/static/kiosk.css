@@ -12,9 +12,14 @@ body {
 body.view-normal       { background: #1e8449; color: #fff; }
 body.view-suspect      { background: #f1c40f; color: #1c1c1c; }
 body.view-alarm        { background: #b03a2e; color: #fff; }
-body.view-check        { background: #b9770e; color: #fff; }
+/* 점검·주소 오류: 흰 글씨가 잘 보이도록(명암비 4.5:1 이상) 어두운 호박색 */
+body.view-check,
+body.view-denied       { background: #8a5a00; color: #fff; }
 body.view-disconnected,
+body.view-select,
 body.view-offline      { background: #4d5656; color: #fff; }
+
+.device-list a { color: #fff; }
 
 .screen {
   display: flex;
@@ -58,7 +63,7 @@ h1 { font-size: clamp(2.5rem, 7vw, 4.5rem); font-weight: 800; }
   padding: 12px 16px;
 }
 #events li + li { margin-top: 6px; }
-.note { margin-top: 12px; font-size: 1rem; opacity: 0.85; }
+.note { margin-top: 12px; font-size: 1rem; }
 
 .problems {
   list-style: none;
@@ -71,6 +76,18 @@ h1 { font-size: clamp(2.5rem, 7vw, 4.5rem); font-weight: 800; }
 .problems li + li { margin-top: 6px; }
 
 footer { flex-shrink: 0; }
+
+/* 해제 요청이 실패했을 때 버튼 바로 위에 보이는 안내 (어느 배경색에서도 읽히게 어두운 바탕) */
+.clear-error {
+  margin-bottom: 12px;
+  padding: 12px 20px;
+  border-radius: 16px;
+  background: #1c1c1c;
+  color: #fff;
+  font-size: clamp(1.3rem, 3vw, 2rem);
+  font-weight: 700;
+  text-align: center;
+}
 
 /* 넘어진 상태에서도 누르기 쉽도록 화면 아래 전체 폭 버튼 */
 .clear-btn {

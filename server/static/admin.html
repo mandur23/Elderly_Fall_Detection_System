@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>낙상 감지 관리자</title>
+  <link rel="stylesheet" href="/static/admin.css">
+</head>
+<body>
+  <header class="bar">
+    <div class="brand">
+      <h1>낙상 감지 관리자</h1>
+      <span id="server-info" class="muted">서버 연결 중…</span>
+    </div>
+    <div class="bar-right">
+      <span id="notify-badge" class="badge hidden">보호자 알림 미설정</span>
+      <span id="clock" class="muted">--:--:--</span>
+      <form id="logout" class="hidden" method="post" action="/admin/logout"><button type="submit" class="link-btn">로그아웃</button></form>
+    </div>
+  </header>
+
+  <div id="alarm-banner" class="banner alarm hidden"></div>
+  <div id="offline-banner" class="banner offline hidden">서버에 연결할 수 없습니다. 서버 PC를 확인해 주세요.</div>
+  <ul id="server-problems" class="banner check hidden"></ul>
+
+  <main>
+    <section class="summary">
+      <div class="tile"><span class="tile-label">연결된 장치</span><strong id="sum-connected">-</strong></div>
+      <div class="tile alarm"><span class="tile-label">경보</span><strong id="sum-alarm">-</strong></div>
+      <div class="tile suspect"><span class="tile-label">낙상 의심 (확인 중)</span><strong id="sum-suspect">-</strong></div>
+      <div class="tile check"><span class="tile-label">점검 필요·연결 끊김</span><strong id="sum-check">-</strong></div>
+    </section>
+
+    <section>
+      <h2>장치</h2>
+      <div id="devices" class="devices"><p class="muted">아직 접속한 라즈베리파이가 없습니다.</p></div>
+    </section>
+
+    <section class="columns">
+      <div>
+        <h2>최근 낙상 의심 기록</h2>
+        <table class="events">
+          <thead><tr><th>시각</th><th>장치</th><th>결과</th><th>보호자 알림</th><th>해제</th></tr></thead>
+          <tbody id="events"><tr><td colspan="5" class="muted">기록이 없습니다.</td></tr></tbody>
+        </table>
+      </div>
+      <div>
+        <h2>장치 이상·복구 알림</h2>
+        <ul id="system-events" class="system"><li class="muted">기록이 없습니다.</li></ul>
+      </div>
+    </section>
+
+    <section>
+      <h2>보호자 계정 <span class="muted small">— 보호자는 <a href="/g" target="_blank" rel="noopener">보호자 웹(/g)</a>에서 맡은 장치만 봅니다</span></h2>
+      <div class="columns">
+        <table class="events">
+          <thead><tr><th>아이디</th><th>이름</th><th>맡은 장치</th><th>해제 권한</th><th>마지막 로그인</th><th></th></tr></thead>
+          <tbody id="guardians"><tr><td colspan="6" class="muted">보호자 계정이 없습니다.</td></tr></tbody>
+        </table>
+        <form id="guardian-form" class="guardian-form" autocomplete="off">
+          <h3 id="guardian-form-title">보호자 추가</h3>
+          <input type="hidden" name="id">
+          <label>아이디 <input name="username" required pattern="[a-z0-9_.\-]{3,32}" placeholder="영문 소문자·숫자 3~32자"></label>
+          <label>이름 <input name="name" placeholder="예: 큰딸"></label>
+          <label>비밀번호 <input name="password" type="password" autocomplete="new-password" placeholder="8자 이상"></label>
+          <fieldset>
+            <legend>맡은 장치</legend>
+            <div id="guardian-devices"></div>
+            <input name="extra_devices" placeholder="아직 접속하지 않은 장치 id (쉼표로 구분)">
+          </fieldset>
+          <label class="check"><input type="checkbox" name="can_clear" checked> 보호자 웹에서 경보를 끌 수 있음</label>
+          <p id="guardian-error" class="error hidden"></p>
+          <div class="form-actions">
+            <button type="submit" class="primary">저장</button>
+            <button type="button" id="guardian-cancel" class="link-btn hidden">취소</button>
+          </div>
+        </form>
+      </div>
+    </section>
+
+    <p class="note">영상과 음성 원본은 이 화면에 보이지 않으며 서버에 저장하지 않습니다.</p>
+  </main>
+
+  <template id="device-card">
+    <article class="card">
+      <header>
+        <div>
+          <h3 class="name"></h3>
+          <span class="id muted"></span>
+        </div>
+        <span class="state-badge"></span>
+      </header>
+      <p class="detail"></p>
+      <ul class="checks">
+        <li class="camera">카메라</li>
+        <li class="mic">마이크</li>
+        <li class="speaker">스피커</li>
+      </ul>
+      <dl class="stats"></dl>
+      <ul class="problems"></ul>
+      <footer>
+        <a class="kiosk-link" target="_blank" rel="noopener">현장 화면 보기</a>
+        <button type="button" class="clear-btn hidden">관리자 확인 후 해제</button>
+        <button type="button" class="forget-btn hidden">목록에서 지우기</button>
+      </footer>
+    </article>
+  </template>
+
+  <script src="/static/admin.js"></script>
+</body>
+</html>

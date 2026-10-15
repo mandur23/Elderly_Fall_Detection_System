@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="theme-color" content="#1e8449">
+  <title>가족 안심 확인</title>
+  <link rel="stylesheet" href="/static/guardian.css">
+</head>
+<body>
+  <header class="top">
+    <div>
+      <h1>가족 안심 확인</h1>
+      <p id="who" class="muted"></p>
+    </div>
+    <form method="post" action="/g/logout"><button class="text-btn" type="submit">로그아웃</button></form>
+  </header>
+
+  <div id="offline" class="banner offline hidden">서버에 연결할 수 없습니다. 잠시 후 다시 확인합니다.</div>
+  <ul id="server-problems" class="banner check hidden"></ul>
+
+  <main>
+    <section id="devices" class="devices"><p class="muted">불러오는 중…</p></section>
+
+    <button id="sound-btn" class="sound-btn" type="button" aria-pressed="false">🔔 경보 소리 켜기</button>
+    <p class="hint muted">이 화면을 켜 두면 경보가 날 때 소리와 진동으로 알려 드려요. 소리를 켜 두면 경보가 끝날 때까지 10초마다 다시 울려요.</p>
+
+    <section>
+      <h2>최근 기록</h2>
+      <ul id="events" class="events"><li class="muted">기록이 없습니다.</li></ul>
+    </section>
+
+    <p class="note">이 서비스는 보조 수단입니다. 응급 상황이라고 생각되면 바로 119에 신고해 주세요.
+      영상과 음성 원본은 보여 주지 않으며 저장하지 않습니다.</p>
+  </main>
+
+  <template id="device-card">
+    <article class="card">
+      <div class="status">
+        <span class="dot"></span>
+        <div>
+          <h2 class="name"></h2>
+          <p class="headline"></p>
+        </div>
+      </div>
+      <p class="detail"></p>
+      <ul class="problems"></ul>
+      <div class="actions">
+        <a class="call-btn hidden" href="tel:119">119 전화</a>
+        <button class="clear-btn hidden" type="button">현장 확인 완료 · 경보 끄기</button>
+      </div>
+      <p class="counts muted"></p>
+    </article>
+  </template>
+
+  <script src="/static/guardian.js"></script>
+</body>
+</html>

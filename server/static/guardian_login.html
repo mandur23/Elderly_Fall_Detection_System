@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="theme-color" content="#1e8449">
+  <title>가족 안심 확인 로그인</title>
+  <link rel="stylesheet" href="/static/guardian.css">
+</head>
+<body>
+  <div class="login">
+    <form method="post" action="/g/login">
+      <h1>가족 안심 확인</h1>
+      <p class="muted">관리자에게 받은 아이디와 비밀번호로 로그인하세요.</p>
+      <p id="error" class="error hidden"></p>
+      <input name="username" autocomplete="username" autocapitalize="none" placeholder="아이디" required autofocus>
+      <input type="password" name="password" autocomplete="current-password" placeholder="비밀번호" required>
+      <button type="submit">로그인</button>
+    </form>
+  </div>
+  <script src="/static/guardian_login.js"></script>
+</body>
+</html>

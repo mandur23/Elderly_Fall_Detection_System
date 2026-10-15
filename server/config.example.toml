@@ -1,0 +1,40 @@
+# 서버 설정 예시. 복사해서 server/config.toml로 저장한 뒤 고칩니다(config.toml은 저장소에 올리지 않습니다).
+#   copy server\config.example.toml server\config.toml      (Windows)
+#   cp server/config.example.toml server/config.toml        (Linux)
+# 적지 않은 항목은 server/config.py의 기본값을 씁니다. 상대 경로는 저장소 최상위 기준입니다.
+# 환경변수가 있으면 이 파일보다 우선합니다: DEVICE_TOKEN, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID,
+# FALL_SERVER_HOST, FALL_SERVER_PORT, FALL_POSE_MODEL, FALL_VOSK_MODEL, FALL_DB_PATH
+
+# 라즈베리파이(edge)와 같은 값. 비어 있으면 서버가 시작하지 않습니다.
+# 만들기: python -c "import secrets; print(secrets.token_urlsafe(24))"
+device_token = ""
+
+device_name = "거실"     # 알림 메시지와 화면에 표시할 설치 위치
+host = "0.0.0.0"         # 같은 공유기의 라즈베리파이가 접속할 수 있게 모든 주소에서 받음
+port = 8000
+
+# 모델 경로 (README '설치' 참고)
+pose_model_path = "assets/models/pose_landmarker_lite.task"
+vosk_model_path = "assets/models/vosk-model-small-ko-0.22"
+
+# 보호자 알림 (텔레그램). 둘 다 비어 있으면 '알림 미설정'으로 표시하고 보내지 않습니다.
+telegram_bot_token = ""
+telegram_chat_id = ""
+
+# 녹음한 안내 음성 wav (없으면 운영체제 합성 음성 -> 알림음)
+# prompt_wav = "assets/audio/ask_status.wav"
+# tts_voice = "Microsoft Heami Desktop"
+
+# 영상 설정 (edge에 welcome으로 알려 줌)
+# video_width = 640
+# video_height = 480
+# video_fps = 10
+# jpeg_quality = 80
+
+# 기록
+# db_path = "data/server_events.db"
+# store_voice_text = false      # 인식 문장 원문 저장 (기본: 저장 안 함)
+# event_retention_days = 0      # 0이면 자동 삭제 안 함
+
+# 장치 문제가 이 시간(초) 이상 이어지면 보호자에게 '장치 이상' 알림
+# device_alert_after_seconds = 180

@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>낙상 감지 현장 화면</title>
+  <link rel="stylesheet" href="/static/kiosk.css">
+</head>
+<body class="view-offline">
+  <div class="screen">
+    <header class="top">
+      <span id="clock">--:--:--</span>
+      <span id="location"></span>
+      <span id="notify-badge"></span>
+    </header>
+
+    <main class="center">
+      <h1 id="title">연결 중…</h1>
+      <p id="desc">서버에 연결하고 있습니다.</p>
+
+      <section id="suspect-panel" class="panel hidden">
+        <p class="prompt">{{PROMPT_TEXT}}</p>
+        <p id="attempt" class="sub"></p>
+      </section>
+
+      <section id="alarm-panel" class="panel hidden">
+        <p id="notify-status" class="prompt"></p>
+        <p class="sub">잘못된 경보라면 아래 버튼을 눌러 해제해 주세요.</p>
+      </section>
+
+      <ul id="problems" class="problems hidden"></ul>
+
+      <section id="history-panel" class="panel hidden">
+        <h2>최근 기록</h2>
+        <ul id="events"><li>기록이 없습니다.</li></ul>
+        <p class="note">영상과 음성 원본은 저장하지 않습니다.</p>
+      </section>
+    </main>
+
+    <footer>
+      <button id="clear-button" class="clear-btn hidden" type="button">괜찮아요</button>
+    </footer>
+  </div>
+  <script src="/static/kiosk.js"></script>
+</body>
+</html>

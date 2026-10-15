@@ -9,8 +9,10 @@
 마이크 ──PCM 16kHz, 0.1초 단위(서버가 켤 때만)──▶   PC 서버  ws://<서버>:8000/ws/device
 스피커 ◀──PCM(play_begin → AUDIO_OUT → play_end)──
 상태   ──2초마다 카메라·마이크·스피커·fps·CPU 온도──▶
-화면   Chromium 키오스크 ── http://<서버>:8000/kiosk
+화면   Chromium 키오스크 ── http://<서버>:8000/kiosk?device=<이 장치 id>&key=<장치별 키>  (서버에 여러 대가 붙어도 자기 장치만 표시)
 ```
+
+현장 화면 주소의 `key`는 장치 토큰과 `device_id`로 계산한 장치별 키(`shared/protocol.py`의 `kiosk_key`)입니다. 서버도 같은 토큰으로 같은 값을 계산하므로, 이 키가 붙은 화면만 그 장치의 상태 보기와 '괜찮아요' 해제를 할 수 있습니다. `kiosk.sh`가 `--print-url kiosk`로 주소를 받아 열기 때문에 직접 입력할 일은 없습니다.
 
 ## 파일
 
@@ -60,7 +62,7 @@ systemctl --user start fall-edge
 journalctl --user -u fall-edge -f          # 로그
 ```
 
-재부팅하면 `fall-edge` 서비스와 키오스크 화면이 자동으로 뜹니다. 서비스는 프로그램이 끝나면 3초 뒤 다시 띄웁니다(`Restart=always`).
+재부팅하면 `fall-edge` 서비스와 키오스크 화면이 자동으로 뜹니다. 서비스는 프로그램이 끝나면 3초 뒤 다시 띄웁니다(`Restart=always`). 단, 설정 오류(종료 코드 2)는 다시 띄워도 같으므로 멈춥니다(`RestartPreventExitStatus=2`). `config.toml`을 고친 뒤 `systemctl --user restart fall-edge`로 다시 시작하세요.
 
 ## 설정
 
@@ -83,7 +85,7 @@ journalctl --user -u fall-edge -f          # 로그
 | `[speaker] volume` | `--volume` | `1.0` | 0.0~1.0 |
 | `[log] level` | `--log-level` | `INFO` | |
 | | `--list-devices` | | 오디오 장치 목록을 보여 주고 끝냄 |
-| | `--print-url kiosk\|health\|ws\|http` | | 설정된 서버 URL을 출력하고 끝냄(키오스크 스크립트가 씀) |
+| | `--print-url kiosk\|health\|ws\|http` | | 설정된 서버 URL을 출력하고 끝냄(키오스크 스크립트가 씀). `kiosk`는 `device`와 장치별 `key`가 붙은 주소이며 토큰이 있어야 함 |
 
 영상 해상도·fps·JPEG 품질은 edge에서 정하지 않고 **서버가 `welcome`/`config`로 정합니다**(기본 640×480, 10fps, 품질 80).
 
@@ -92,11 +94,16 @@ journalctl --user -u fall-edge -f          # 로그
 - **접속**: `ws://<서버>:8000/ws/device`에 `Authorization: Bearer <토큰>`으로 접속 → `hello` → 서버의 `welcome` 영상 설정 적용 → 영상·상태 전송 시작. 10초마다 ping.
 - **재접속**: 끊기면 1 → 2 → 5 → 10초(이후 10초) 간격으로 다시 접속. 토큰 거절(401), 규약 오류(4400), 같은 `device_id` 접속(4409)은 다시 해도 같은 결과라 10초 간격.
 - **영상**: 카메라는 계속 읽고, 서버 fps에 맞춰 골라 JPEG로 보냅니다. 이전 장면을 아직 보내는 중이면 새 장면은 버립니다(쌓지 않음, 인코딩도 하지 않음). 시각은 촬영 직후 `time.monotonic()`.
+  - 약한 Wi-Fi에서 오래된 장면이 송신 버퍼에 쌓이지 않게, 커널에는 아직 보내지 못한 데이터를 32KB까지만 두고(리눅스 `TCP_NOTSENT_LOWAT`) asyncio 쓰기 버퍼도 16KB로 줄입니다. 장면이 버퍼를 다 떠날 때까지는 '보내는 중'으로 보고 그동안 찍힌 장면을 버리므로, 서버는 늘 최근 장면을 받고 ping/pong도 밀리지 않습니다. WebSocket 압축은 쓰지 않습니다(JPEG는 거의 줄지 않음).
   - 해상도는 **회전 전 기준**입니다. 카메라가 더 크게 주면 비율을 유지해 줄이고, 작으면 키우지 않습니다. 90·270도 회전이면 세로 영상이 됩니다.
+  - 서버가 해상도나 fps를 바꾸면 카메라를 그 값으로 다시 엽니다(품질만 바뀌면 다시 열지 않음). 영상 파일은 fps만 바뀌면 다시 열지 않습니다.
   - 영상 파일은 파일의 fps대로(실시간처럼) 내보내고, 시각은 장면이 나올 예정 시각입니다.
-  - 카메라가 3초 동안 장면을 주지 않거나 열리지 않으면 1·2·5·10초 간격으로 다시 엽니다. 카메라 스레드가 60초 넘게 멈추면(드라이버 정지) 프로그램을 끝내 systemd가 다시 띄우게 합니다.
+  - 카메라가 3초 동안 장면을 주지 않거나 열리지 않으면 1·2·5·10초 간격으로 다시 엽니다. 예상하지 못한 오류도 기록한 뒤 다시 엽니다.
+- **장치 감시**: 서버 접속 여부와 상관없이 2초마다 확인해, 다시 시작해야만 고칠 수 있는 문제면 프로그램을 끝내 systemd가 다시 띄우게 합니다(종료 코드 1).
+  - 카메라 스레드가 60초 넘게 멈추거나(드라이버 정지) 스레드가 죽었을 때.
+  - USB 마이크·스피커를 60초 넘게 쓰지 못했고 그사이 사운드 카드 목록(`/proc/asound/cards`)이 바뀌었을 때. PortAudio는 시작할 때 한 번만 장치를 찾으므로 뺐다 꽂은 장치는 다시 시작해야 쓸 수 있습니다. 카드 목록이 그대로면(장치가 아예 없거나 다른 프로그램이 쓰는 중) 다시 시작해도 같으므로 끝내지 않고 계속 다시 엽니다. 서버가 켠 음성 확인(마이크 전송)이나 재생이 진행 중이면 끝날 때까지 기다립니다.
 - **마이크**: 장치는 계속 열어 두지만(고장을 바로 알기 위해), 서버가 `mic enabled=true`를 보낸 동안에만 16kHz mono s16le를 0.1초(3200바이트) 단위로 보냅니다. 시각은 각 조각 첫 샘플의 녹음 시각.
-- **스피커**: `play_begin` → `AUDIO_OUT` → `play_end`를 받은 순서대로 재생하고, 장치 출력 지연까지 기다린 뒤 `playback_done`을 보냅니다(안내 음성이 녹음되지 않게).
+- **스피커**: `play_begin` → `AUDIO_OUT` → `play_end`를 받은 순서대로 재생하고, 장치 출력 지연까지 기다린 뒤 `playback_done`을 보냅니다(안내 음성이 녹음되지 않게). `play_end` 없이 다음 `play_begin`이 오면 앞 소리는 받은 데까지만 재생하고 끝냅니다.
   - `loop: true`면 `play_stop`까지 반복합니다. 반복 중에 새 `play_begin`이 오면 반복을 끊고(`playback_done`에 `stopped: true`) 새 소리를 재생합니다.
   - `play_stop`이면 즉시 멈추고 받은 소리를 버리며, 끝나지 않은 id마다 `playback_done`(`stopped: true`)을 보냅니다.
 - **연결이 끊기면** 재생과 마이크 전송을 멈춥니다. 다시 접속해도 마이크는 서버가 다시 켤 때까지 꺼져 있습니다.
@@ -136,7 +143,7 @@ python -m venv .venv
 .venv/Scripts/python -m unittest discover -s edge/tests -t .
 ```
 
-가짜 서버에 실제로 접속해 hello/welcome, 영상 해상도·fps·촬영 시각, 상태 전송, 마이크 켜고 끄기, 재생·반복·중단과 `playback_done`, 끊김 뒤 재접속(재생·마이크 중지), 잘못된 토큰, 규약 버전 불일치를 확인합니다. 소리는 가짜 출력(null)으로만 재생합니다.
+가짜 서버에 실제로 접속해 hello/welcome, 영상 해상도·fps·촬영 시각, 상태 전송, 마이크 켜고 끄기, 재생·반복·중단과 `playback_done`, 끊김 뒤 재접속(재생·마이크 중지), 잘못된 토큰, 규약 버전 불일치, 송신 버퍼 한도, 장치 감시(카메라 정지, USB 마이크·스피커 다시 꽂기)를 확인합니다. 소리는 가짜 출력(null)으로만 재생하고, 마이크·스피커 장치 시험은 가짜 sounddevice로 합니다.
 
 ## 문제 해결
 
@@ -150,9 +157,10 @@ python -m venv .venv
 | picamera2에서 `numpy.dtype size changed` 등 | 가상환경에 pip numpy가 깔림. `.venv/bin/pip uninstall numpy opencv-python opencv-python-headless` 후 apt 것을 쓰세요 |
 | USB 웹캠을 쓰고 싶은데 카메라 모듈이 잡힘 | `[camera] backend = "opencv"`, `source = 0` |
 | `카메라에서 영상을 받지 못합니다` | USB 연결·전원 확인. 1·2·5·10초 간격으로 저절로 다시 엽니다 |
-| `마이크를 열 수 없습니다` / `스피커를 열 수 없습니다` | `--list-devices`로 장치 확인 후 `device` 지정. 16kHz를 직접 지원하지 않는 장치는 `default`나 `pipewire` 장치를 고르세요(PipeWire가 변환) |
+| `마이크를 열 수 없습니다` / `스피커를 열 수 없습니다` | `--list-devices`로 장치 확인 후 `device` 지정. 16kHz를 직접 지원하지 않는 장치는 `default`나 `pipewire` 장치를 고르세요(PipeWire가 변환). USB 장치를 뺐다 꽂았으면 60초 안에 저절로 다시 시작해 새 장치를 찾습니다(`... 사운드 카드가 바뀌었습니다` 로그) |
 | 소리가 나지 않음 | `volume`, `alsamixer`/작업 표시줄 음량, 출력 장치(HDMI·3.5mm·USB) 선택. 로그의 `스피커 열림: ...` 장치 이름 확인 |
-| 키오스크 화면이 뜨지 않음 | 서버 `/api/health`가 응답하는지(응답할 때까지 기다림). 터미널에서 `edge/deploy/kiosk.sh`를 직접 실행해 메시지 확인 |
+| 키오스크 화면이 뜨지 않음 | 서버 `/api/health`가 응답하는지(응답할 때까지 기다림), `config.toml`에 `token`이 있는지(현장 화면 키 계산에 필요). 터미널에서 `edge/deploy/kiosk.sh`를 직접 실행해 메시지 확인 |
+| 현장 화면이 상태를 못 가져옴(권한 오류) | `config.toml`의 `token`·`[device] id`가 서버에 등록된 값과 같은지. 바꿨으면 키오스크(Chromium)를 다시 띄우세요(주소의 `key`가 바뀜) |
 | 화면이 꺼짐 | `sudo raspi-config` → Display Options → Screen Blanking → 끄기 |
 
 로그: `journalctl --user -u fall-edge -f` (자세히 보려면 `[log] level = "DEBUG"`).

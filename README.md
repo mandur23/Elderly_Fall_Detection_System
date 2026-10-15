@@ -67,7 +67,19 @@ pip install -r edge/requirements.txt
 python -m edge --server 127.0.0.1 --token <같은 토큰> --source 0
 ```
 
-테스트: `python -m unittest discover -s shared/tests -t .` (`edge/tests`, `server/tests`도 같은 방식)
+서버가 켜지면 쓰는 화면:
+
+| 주소 | 누가 | 내용 |
+| --- | --- | --- |
+| `http://<서버>:8000/kiosk?device=<장치 id>` | 어르신 (라즈베리파이 화면) | 그 방의 상태와 '괜찮아요' 버튼 |
+| `http://<서버>:8000/g` | 보호자 (휴대폰) | 맡은 장치 상태·경보·기록, 119 전화, 경보 끄기 |
+| `http://<서버>:8000/admin` | 관리자 | 모든 장치 상태, 기록, 장치 이상, 보호자 계정 관리 |
+
+Windows 서버 PC에서 계속 켜 두기와 자동 배포(GitHub의 새 코드를 받아 시험 후 재시작)는
+`server\deploy\windows\`(`start_server.bat`, `install_autostart.bat`, `update_server.ps1`)를 씁니다([server/README.md](server/README.md)).
+
+테스트: `python -m unittest discover -s shared/tests -t .` (`edge/tests`, `server/tests`도 같은 방식). GitHub에 push하면
+`.github/workflows/tests.yml`이 자동으로 돌립니다.
 
 ### 이전 구현 (참고용)
 

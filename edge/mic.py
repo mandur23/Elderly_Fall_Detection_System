@@ -7,6 +7,7 @@
 import logging
 import threading
 import time
+from pathlib import Path
 from typing import Callable, List, Optional, Sequence, Tuple
 
 from shared import protocol
@@ -16,8 +17,21 @@ log = logging.getLogger("edge.mic")
 RETRY_DELAYS = (1.0, 2.0, 5.0, 10.0)
 STALL_SECONDS = 2.0   # 이 시간 동안 녹음 콜백이 없으면 장치 문제로 보고 다시 연다
 BYTES_PER_SECOND = protocol.AUDIO_RATE * protocol.AUDIO_SAMPLE_BYTES * protocol.AUDIO_CHANNELS
+SOUND_CARDS_PATH = Path("/proc/asound/cards")
 
 Sink = Callable[[bytes, float], None]
+
+
+def sound_cards() -> Optional[str]:
+    """리눅스(ALSA)가 지금 아는 사운드 카드 목록. 읽을 수 없으면(리눅스가 아님) None.
+
+    PortAudio(sounddevice)는 처음 불러올 때 한 번만 장치를 찾는다. 그 뒤 이 목록이 바뀌었으면(USB 장치를
+    뺐다 꽂음) 프로그램을 다시 시작해야 새 장치를 쓸 수 있다. 마이크와 스피커가 함께 쓴다.
+    """
+    try:
+        return SOUND_CARDS_PATH.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
 
 
 class ChunkAssembler:
@@ -69,6 +83,14 @@ class Microphone:
     def status(self) -> Tuple[bool, str]:
         raise NotImplementedError
 
+    def failing_for(self) -> float:
+        """장치를 쓰지 못한 채 이어진 시간(초). 0이면 정상이거나 해당 없음."""
+        return 0.0
+
+    def devices_changed(self) -> bool:
+        """장치 목록을 만든 뒤 사운드 카드가 바뀌었는지(다시 시작해야 새 장치를 찾는지)."""
+        return False
+
 
 class DisabledMicrophone(Microphone):
     def status(self) -> Tuple[bool, str]:
@@ -80,9 +102,10 @@ class SoundDeviceMicrophone(Microphone):
 
     BLOCK_FRAMES = protocol.AUDIO_CHUNK_BYTES // protocol.AUDIO_SAMPLE_BYTES  # 0.1초
 
-    def __init__(self, device=None, retry_delays: Sequence[float] = RETRY_DELAYS):
+    def __init__(self, device=None, retry_delays: Sequence[float] = RETRY_DELAYS,
+                 cards: Callable[[], Optional[str]] = sound_cards):
         super().__init__()
-        self.device, self._retry_delays = device, tuple(retry_delays)
+        self.device, self._retry_delays, self._cards = device, tuple(retry_delays), cards
         self._asm = ChunkAssembler()
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
@@ -90,10 +113,25 @@ class SoundDeviceMicrophone(Microphone):
         self._open = False
         self._error = "마이크를 여는 중입니다"
         self._overflows = 0
+        self._fail_since: Optional[float] = None   # 장치를 쓰지 못하기 시작한 시각
+        self._cards_at_start: Optional[str] = None  # PortAudio가 장치를 찾을 때의 사운드 카드 목록
 
     def status(self) -> Tuple[bool, str]:
         ok = self._open and time.monotonic() - self._last_callback < STALL_SECONDS
         return ok, "" if ok else (self._error or "마이크 입력이 멈췄습니다")
+
+    def failing_for(self) -> float:
+        since = self._fail_since
+        return 0.0 if since is None else time.monotonic() - since
+
+    def devices_changed(self) -> bool:
+        before = self._cards_at_start
+        now = self._cards() if before is not None else None
+        return now is not None and now != before
+
+    def _failing(self) -> None:
+        if self._fail_since is None:
+            self._fail_since = time.monotonic()
 
     def start(self) -> None:
         if self._thread is None:
@@ -127,7 +165,10 @@ class SoundDeviceMicrophone(Microphone):
 
     def _run(self) -> None:
         attempt = 0
+        # sounddevice는 처음 불러올 때(바로 아래) 장치를 찾는다. 그때의 사운드 카드 목록을 기억해 둔다.
+        self._cards_at_start = self._cards()
         while not self._stop.is_set():
+            stream = None
             try:
                 import sounddevice as sd
                 stream = sd.RawInputStream(
@@ -135,14 +176,16 @@ class SoundDeviceMicrophone(Microphone):
                     blocksize=self.BLOCK_FRAMES, device=self.device, callback=self._callback)
                 stream.start()
             except Exception as e:
+                _close_quietly(stream)
                 self._error = f"마이크를 열 수 없습니다: {e}"
+                self._failing()
                 delay = self._retry_delays[min(attempt, len(self._retry_delays) - 1)]
                 attempt += 1
                 log.warning("%s (%.0f초 뒤 다시 시도)", self._error, delay)
                 self._stop.wait(delay)
                 continue
             log.info("마이크 열림: %s", _device_name(sd, stream.device))
-            self._last_callback = time.monotonic()
+            opened = self._last_callback = time.monotonic()
             self._open, self._error = True, ""
             try:
                 while not self._stop.wait(0.5):
@@ -153,14 +196,13 @@ class SoundDeviceMicrophone(Microphone):
                         self._error = "마이크 입력이 멈췄습니다"
                         break
                     attempt = 0
+                    if self._last_callback > opened:
+                        self._fail_since = None   # 소리가 실제로 들어온다
             finally:
                 self._open = False
-                try:
-                    stream.abort()
-                    stream.close()
-                except Exception:
-                    pass
+                _close_quietly(stream)
             if not self._stop.is_set():
+                self._failing()
                 delay = self._retry_delays[min(attempt, len(self._retry_delays) - 1)]
                 attempt += 1
                 log.warning("%s (%.0f초 뒤 다시 엽니다)", self._error, delay)
@@ -172,3 +214,14 @@ def _device_name(sd, device) -> str:
         return f"{device} {sd.query_devices(device)['name']}"
     except Exception:
         return str(device)
+
+
+def _close_quietly(stream) -> None:
+    """열다 실패했거나 멈춘 스트림을 닫는다(PortAudio 자원이 남지 않게)."""
+    if stream is None:
+        return
+    try:
+        stream.abort()
+        stream.close()
+    except Exception:
+        pass

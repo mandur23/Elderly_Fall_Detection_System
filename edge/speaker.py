@@ -17,6 +17,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
+from edge.mic import sound_cards
 from shared import protocol
 
 log = logging.getLogger("edge.speaker")
@@ -50,6 +51,9 @@ class PlaybackBuffer:
     def begin(self, clip_id: Any, loop: bool = False) -> List[Any]:
         """새 소리를 받기 시작한다. 반복 중이던 소리는 끊고 그 id 목록을 돌려준다(stopped로 알릴 것)."""
         with self._lock:
+            if self._receiving is not None:
+                # play_end 없이 다음 소리가 왔다. 받은 데까지만 재생하고 끝낸다(영영 기다리며 뒤 소리를 막지 않게).
+                self._receiving.ended = True
             cut = [c.id for c in self._queue if c.loop]
             self._queue = [c for c in self._queue if not c.loop and c.id != clip_id]
             clip = _Clip(clip_id, bool(loop))
@@ -206,6 +210,14 @@ class Speaker:
     def status(self) -> Tuple[bool, str]:
         return True, ""
 
+    def failing_for(self) -> float:
+        """장치를 쓰지 못한 채 이어진 시간(초). 0이면 정상이거나 해당 없음."""
+        return 0.0
+
+    def devices_changed(self) -> bool:
+        """장치 목록을 만든 뒤 사운드 카드가 바뀌었는지(다시 시작해야 새 장치를 찾는지)."""
+        return False
+
 
 class NullSpeaker(Speaker):
     """소리를 내지 않고 실시간 속도로 소비한다. PC 시험, 자동 테스트용."""
@@ -248,9 +260,10 @@ class SoundDeviceSpeaker(Speaker):
     """sounddevice(PortAudio)로 재생한다. 스트림은 열어 두고 소리가 없을 때는 무음을 낸다.
     장치가 끊기면 1·2·5·10초 간격으로 다시 연다."""
 
-    def __init__(self, device=None, volume: float = 1.0, retry_delays: Sequence[float] = RETRY_DELAYS):
+    def __init__(self, device=None, volume: float = 1.0, retry_delays: Sequence[float] = RETRY_DELAYS,
+                 cards: Callable[[], Optional[str]] = sound_cards):
         super().__init__(volume)
-        self.device, self._retry_delays = device, tuple(retry_delays)
+        self.device, self._retry_delays, self._cards = device, tuple(retry_delays), cards
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._last_callback = 0.0
@@ -258,10 +271,25 @@ class SoundDeviceSpeaker(Speaker):
         self._error = "스피커를 여는 중입니다"
         self._latency = 0.1
         self._underflows = 0
+        self._fail_since: Optional[float] = None   # 장치를 쓰지 못하기 시작한 시각
+        self._cards_at_start: Optional[str] = None  # PortAudio가 장치를 찾을 때의 사운드 카드 목록
 
     def status(self) -> Tuple[bool, str]:
         ok = self._open and time.monotonic() - self._last_callback < STALL_SECONDS
         return ok, "" if ok else (self._error or "스피커 출력이 멈췄습니다")
+
+    def failing_for(self) -> float:
+        since = self._fail_since
+        return 0.0 if since is None else time.monotonic() - since
+
+    def devices_changed(self) -> bool:
+        before = self._cards_at_start
+        now = self._cards() if before is not None else None
+        return now is not None and now != before
+
+    def _failing(self) -> None:
+        if self._fail_since is None:
+            self._fail_since = time.monotonic()
 
     def start(self) -> None:
         if self._thread is None:
@@ -288,7 +316,10 @@ class SoundDeviceSpeaker(Speaker):
 
     def _run(self) -> None:
         attempt = 0
+        # sounddevice는 처음 불러올 때(바로 아래) 장치를 찾는다. 그때의 사운드 카드 목록을 기억해 둔다.
+        self._cards_at_start = self._cards()
         while not self._stop.is_set():
+            stream = None
             try:
                 import sounddevice as sd
                 stream = sd.RawOutputStream(
@@ -296,7 +327,9 @@ class SoundDeviceSpeaker(Speaker):
                     device=self.device, callback=self._callback)
                 stream.start()
             except Exception as e:
+                _close_quietly(stream)
                 self._error = f"스피커를 열 수 없습니다: {e}"
+                self._failing()
                 delay = self._retry_delays[min(attempt, len(self._retry_delays) - 1)]
                 attempt += 1
                 log.warning("%s (%.0f초 뒤 다시 시도)", self._error, delay)
@@ -304,7 +337,7 @@ class SoundDeviceSpeaker(Speaker):
                 continue
             self._latency = float(stream.latency or 0.1)
             log.info("스피커 열림: %s (지연 %.0fms)", _device_name(sd, stream.device), self._latency * 1000)
-            self._last_callback = time.monotonic()
+            opened = self._last_callback = time.monotonic()
             self._open, self._error = True, ""
             try:
                 while not self._stop.wait(0.5):
@@ -315,14 +348,13 @@ class SoundDeviceSpeaker(Speaker):
                         self._error = "스피커 출력이 멈췄습니다"
                         break
                     attempt = 0
+                    if self._last_callback > opened:
+                        self._fail_since = None   # 장치가 실제로 소리를 가져간다
             finally:
                 self._open = False
-                try:
-                    stream.abort()
-                    stream.close()
-                except Exception:
-                    pass
+                _close_quietly(stream)
             if not self._stop.is_set():
+                self._failing()
                 delay = self._retry_delays[min(attempt, len(self._retry_delays) - 1)]
                 attempt += 1
                 log.warning("%s (%.0f초 뒤 다시 엽니다)", self._error, delay)
@@ -334,3 +366,14 @@ def _device_name(sd, device) -> str:
         return f"{device} {sd.query_devices(device)['name']}"
     except Exception:
         return str(device)
+
+
+def _close_quietly(stream) -> None:
+    """열다 실패했거나 멈춘 스트림을 닫는다(PortAudio 자원이 남지 않게)."""
+    if stream is None:
+        return
+    try:
+        stream.abort()
+        stream.close()
+    except Exception:
+        pass

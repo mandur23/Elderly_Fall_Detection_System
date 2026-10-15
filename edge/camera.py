@@ -9,6 +9,7 @@ JPEG로 만들어 sink(jpeg, 촬영 시각)로 넘긴다. 시각은 time.monoton
 """
 
 import logging
+import math
 import os
 import threading
 import time
@@ -116,6 +117,7 @@ class PiCameraSource(FrameSource):
 
     def open(self) -> None:
         self.close()
+        cam = None
         try:
             from picamera2 import Picamera2
             cam = Picamera2(self.camera_num)
@@ -127,6 +129,12 @@ class PiCameraSource(FrameSource):
             cam.configure(cfg)
             cam.start()
         except Exception as e:
+            if cam is not None:
+                # 닫지 않으면 카메라를 계속 잡고 있어 다시 열 때마다 실패한다.
+                try:
+                    cam.close()
+                except Exception:
+                    pass
             raise CameraError(f"라즈베리파이 카메라를 열 수 없습니다: {e}") from e
         self._cam = cam
 
@@ -219,7 +227,7 @@ class Camera:
         self._video = {**protocol.DEFAULT_VIDEO, **(video or {})}
         self._opener, self._retry_delays, self._stall_seconds = opener, tuple(retry_delays), stall_seconds
         self._lock = threading.Lock()
-        self._generation = 0          # 해상도가 바뀌면 올려서 카메라를 다시 연다
+        self._generation = 0          # 해상도·fps가 바뀌면 올려서 카메라를 다시 연다
         self._stop = threading.Event()
         self._wake = threading.Event()
         self._sink: Optional[Sink] = None
@@ -242,10 +250,15 @@ class Camera:
             return dict(self._video)
 
     def apply(self, video: Dict) -> None:
-        """서버가 준 영상 설정(width, height, fps, jpeg_quality)을 적용한다. 해상도가 바뀌면 다시 연다."""
+        """서버가 준 영상 설정(width, height, fps, jpeg_quality)을 적용한다.
+
+        카메라는 열 때 정한 해상도·fps로 찍으므로 둘 중 하나가 바뀌면 다시 연다. 영상 파일·URL은 열 때 fps를
+        쓰지 않으므로(파일 속도대로 읽음) fps만 바뀌었을 때는 다시 열지 않는다.
+        """
         with self._lock:
             new = {**self._video, **video}
-            if (new["width"], new["height"]) != (self._video["width"], self._video["height"]):
+            keys = ("width", "height") if isinstance(self.source, str) else ("width", "height", "fps")
+            if any(new[k] != self._video[k] for k in keys):
                 self._generation += 1
                 self._wake.set()
             self._video = new
@@ -258,9 +271,12 @@ class Camera:
         return ok, "" if ok else (self._error or "카메라에서 영상을 받지 못합니다")
 
     def stalled_for(self) -> float:
-        """카메라 스레드가 멈춰 있는 시간(초). 드라이버가 응답하지 않으면 커진다."""
-        if self._thread is None or not self._thread.is_alive():
+        """카메라 스레드가 멈춰 있는 시간(초). 드라이버가 응답하지 않으면 커지고, 스레드가 죽었으면 무한대."""
+        thread = self._thread
+        if thread is None:
             return 0.0
+        if not thread.is_alive():
+            return math.inf
         return time.monotonic() - self._beat
 
     def start(self) -> None:
@@ -288,49 +304,60 @@ class Camera:
             log.warning("카메라: %s", message)
         self._error = message
 
+    def _retry_wait(self, attempt: int) -> int:
+        """attempt번째(0부터) 재시도 간격만큼 기다린다. 다음 attempt를 돌려준다."""
+        delay = self._retry_delays[min(attempt, len(self._retry_delays) - 1)]
+        log.info("카메라를 %.0f초 뒤 다시 엽니다", delay)
+        self._wait(delay)
+        return attempt + 1
+
     def _run(self) -> None:
         attempt = 0
         while not self._stop.is_set():
-            self._beat = time.monotonic()
-            with self._lock:
-                video, generation = dict(self._video), self._generation
             try:
-                src = self._opener(self.backend, self.source, video["width"], video["height"], video["fps"])
-                src.open()
+                attempt = self._open_and_pump(attempt)
             except Exception as e:
-                self._set_error(str(e))
-                delay = self._retry_delays[min(attempt, len(self._retry_delays) - 1)]
-                attempt += 1
-                log.info("카메라를 %.0f초 뒤 다시 엽니다", delay)
-                self._wait(delay)
-                continue
-            self.opens += 1
-            log.info("카메라 열림: %s", src)
-            try:
-                reason, got_frames = self._pump(src, generation)
-            except Exception as e:
-                log.exception("카메라 처리 중 오류")
+                # 예상하지 못한 오류로 스레드가 죽으면 영상이 영영 멈추므로 기록하고 다시 연다.
+                log.exception("카메라 스레드 오류")
                 self._set_error(f"카메라 처리 오류: {e}")
-                reason, got_frames = "failed", False
-            finally:
-                src.close()
-            if got_frames:
-                attempt = 0
-            if reason == "failed" and not self._stop.is_set():
-                delay = self._retry_delays[min(attempt, len(self._retry_delays) - 1)]
-                attempt += 1
-                log.info("카메라를 %.0f초 뒤 다시 엽니다", delay)
-                self._wait(delay)
-            elif reason == "ended":
-                self._set_error("영상 파일이 끝났습니다")
-                while not self._stop.is_set() and self._generation == generation:
-                    self._beat = time.monotonic()
-                    self._wait(1.0)
+                attempt = self._retry_wait(attempt)
+
+    def _open_and_pump(self, attempt: int) -> int:
+        """카메라를 한 번 열어 끝날 때까지 읽는다. 다음 재시도 차례(attempt)를 돌려준다."""
+        self._beat = time.monotonic()
+        with self._lock:
+            video, generation = dict(self._video), self._generation
+        try:
+            src = self._opener(self.backend, self.source, video["width"], video["height"], video["fps"])
+            src.open()
+        except Exception as e:
+            self._set_error(str(e))
+            return self._retry_wait(attempt)
+        self.opens += 1
+        log.info("카메라 열림: %s", src)
+        try:
+            reason, got_frames = self._pump(src, generation)
+        except Exception as e:
+            log.exception("카메라 처리 중 오류")
+            self._set_error(f"카메라 처리 오류: {e}")
+            reason, got_frames = "failed", False
+        finally:
+            src.close()
+        if got_frames:
+            attempt = 0
+        if reason == "failed" and not self._stop.is_set():
+            attempt = self._retry_wait(attempt)
+        elif reason == "ended":
+            self._set_error("영상 파일이 끝났습니다")
+            while not self._stop.is_set() and self._generation == generation:
+                self._beat = time.monotonic()
+                self._wait(1.0)
+        return attempt
 
     def _pump(self, src: FrameSource, generation: int):
         """장면을 읽어 넘긴다. (끝난 이유, 장면을 하나라도 읽었는지)를 돌려준다.
 
-        이유: stop(종료), reconfigure(해상도 변경), loop(파일 반복), ended(파일 끝), failed(카메라 문제).
+        이유: stop(종료), reconfigure(해상도·fps 변경), loop(파일 반복), ended(파일 끝), failed(카메라 문제).
         """
         limiter = RateLimiter()
         file_fps = src.file_fps

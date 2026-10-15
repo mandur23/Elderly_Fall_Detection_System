@@ -5,6 +5,7 @@ import logging
 import signal
 import sys
 from typing import List, Optional
+from urllib.parse import quote
 
 from edge import __version__
 from edge.camera import Camera
@@ -40,7 +41,15 @@ def list_devices() -> int:
 
 def print_url(cfg: EdgeConfig, which: str) -> int:
     ws, http = server_urls(cfg.server)
-    print({"ws": ws, "http": http, "kiosk": http + protocol.KIOSK_PATH, "health": http + protocol.HEALTH_PATH}[which])
+    urls = {"ws": ws, "http": http, "health": http + protocol.HEALTH_PATH}
+    if which == "kiosk":
+        if not cfg.token:
+            raise ConfigError("장치 토큰이 없어 현장 화면 키를 만들 수 없습니다. config.toml의 [server] token을 채우세요")
+        # 서버에 라즈베리파이가 여러 대 붙을 수 있으므로 현장 화면은 이 장치의 상태만 보이게 device를 붙이고,
+        # 이 장치의 화면만 서버 API를 쓸 수 있게 장치별 키(장치 토큰에서 계산, 서버도 같은 값을 계산)를 붙인다.
+        key = protocol.kiosk_key(cfg.token, cfg.device_id)
+        urls["kiosk"] = f"{http}{protocol.KIOSK_PATH}?device={quote(cfg.device_id, safe='')}&key={key}"
+    print(urls[which])
     return 0
 
 

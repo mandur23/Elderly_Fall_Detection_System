@@ -1,9 +1,54 @@
 import asyncio
+import sys
+import threading
+import time
 import unittest
+from unittest import mock
 
-from edge.mic import ChunkAssembler
-from edge.speaker import BYTES_PER_SECOND, NullSpeaker, PlaybackBuffer
+from edge.mic import ChunkAssembler, SoundDeviceMicrophone
+from edge.speaker import BYTES_PER_SECOND, NullSpeaker, PlaybackBuffer, SoundDeviceSpeaker
 from shared import protocol
+
+
+class FakeStream:
+    def __init__(self, callback):
+        self.callback, self.active, self.device, self.latency = callback, False, 0, 0.05
+
+    def start(self):
+        self.active = True
+
+    def abort(self):
+        self.active = False
+
+    def close(self):
+        self.active = False
+
+
+class FakeSoundDevice:
+    """실제 장치를 열지 않는 sounddevice 흉내. fail이 True인 동안은 장치를 열 수 없다(USB 장치를 뺀 상태)."""
+
+    def __init__(self):
+        self.fail = True
+        self.opens = 0
+        self.streams = []
+
+    def _open(self, **kwargs):
+        self.opens += 1
+        if self.fail:
+            raise OSError("장치 없음")
+        self.streams.append(FakeStream(kwargs["callback"]))
+        return self.streams[-1]
+
+    RawInputStream = RawOutputStream = _open
+
+
+def wait(predicate, timeout=5.0):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.02)
+    return predicate()
 
 
 class ChunkAssemblerTest(unittest.TestCase):
@@ -91,6 +136,17 @@ class PlaybackBufferTest(unittest.TestCase):
         data, _ = buf.read(8)
         self.assertEqual(data, b"\x01\x00\x03\x00" + bytes(4))
 
+    def test_begin_without_end_finishes_previous_clip(self):
+        """play_end를 받지 못한 소리가 있어도 다음 소리가 막히지 않는다(받은 데까지 재생)."""
+        buf = PlaybackBuffer()
+        buf.begin("a")
+        buf.feed(b"\x01\x00")
+        buf.begin("b")                  # a의 play_end가 오지 않음
+        buf.feed(b"\x02\x00")
+        buf.end("b")
+        self.assertEqual(buf.read(6), (b"\x01\x00\x02\x00" + bytes(2), [("a", 2), ("b", 4)]))
+        self.assertFalse(buf.busy)
+
 
 class SpeakerTest(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
@@ -137,6 +193,82 @@ class SpeakerTest(unittest.IsolatedAsyncioTestCase):
         speaker.end("a")
         data = speaker.render(2, 0.0)
         self.assertEqual(int.from_bytes(data, "little", signed=True), 500)
+
+
+class DeviceFailureTest(unittest.TestCase):
+    """USB 마이크·스피커를 열지 못하는 시간과 사운드 카드 변화(다시 시작해야 PortAudio가 새 장치를 찾음)."""
+
+    def setUp(self):
+        self.sd = FakeSoundDevice()
+        self.cards = ["0 [vc4hdmi0]\n2 [Device]: USB-Audio"]
+        patcher = mock.patch.dict(sys.modules, {"sounddevice": self.sd})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_mic_failing_time_and_card_change(self):
+        mic = SoundDeviceMicrophone(retry_delays=(0.02,), cards=lambda: self.cards[0])
+        self.assertEqual(mic.failing_for(), 0.0)
+        with self.assertLogs("edge.mic", level="WARNING"):
+            mic.start()
+            try:
+                self.assertTrue(wait(lambda: self.sd.opens >= 3, 2.0))
+                time.sleep(0.1)
+                self.assertGreater(mic.failing_for(), 0.1)
+                self.assertIn("열 수 없습니다", mic.status()[1])
+                self.assertFalse(mic.devices_changed(), "카드가 그대로면 다시 시작해도 같다")
+                self.cards[0] = "0 [vc4hdmi0]"         # USB 장치를 뺐다
+                self.assertTrue(mic.devices_changed())
+            finally:
+                mic.stop()
+
+    def test_mic_recovers_when_device_works(self):
+        mic = SoundDeviceMicrophone(retry_delays=(0.02,), cards=lambda: self.cards[0])
+        feeding = threading.Event()
+
+        def feed():   # 열린 스트림에 0.1초마다 녹음 콜백을 부른다
+            while not feeding.wait(0.1):
+                for stream in list(self.sd.streams):
+                    if stream.active:
+                        stream.callback(bytes(protocol.AUDIO_CHUNK_BYTES), 1600, None, None)
+
+        feeder = threading.Thread(target=feed, daemon=True)
+        feeder.start()
+        with self.assertLogs("edge.mic", level="INFO"):
+            mic.start()
+            try:
+                self.assertTrue(wait(lambda: mic.failing_for() > 0.1, 2.0))
+                self.sd.fail = False                     # 장치가 다시 열림
+                self.assertTrue(wait(lambda: mic.failing_for() == 0.0 and mic.status()[0], 3.0))
+            finally:
+                mic.stop()
+                feeding.set()
+                feeder.join(1.0)
+
+    def test_speaker_failing_time_and_card_change(self):
+        speaker = SoundDeviceSpeaker(retry_delays=(0.02,), cards=lambda: self.cards[0])
+        with self.assertLogs("edge.speaker", level="WARNING"):
+            speaker.start()
+            try:
+                self.assertTrue(wait(lambda: self.sd.opens >= 3, 2.0))
+                time.sleep(0.1)
+                self.assertGreater(speaker.failing_for(), 0.1)
+                self.assertFalse(speaker.status()[0])
+                self.assertFalse(speaker.devices_changed())
+                self.cards[0] += "\n3 [Device_1]: USB-Audio"   # 다시 꽂아 새 번호로 잡혔다
+                self.assertTrue(speaker.devices_changed())
+            finally:
+                speaker.close()
+
+    def test_unknown_cards_never_changed(self):
+        """사운드 카드 목록을 읽을 수 없으면(리눅스가 아님) 다시 시작하지 않는다."""
+        mic = SoundDeviceMicrophone(retry_delays=(0.02,), cards=lambda: None)
+        with self.assertLogs("edge.mic", level="WARNING"):
+            mic.start()
+            try:
+                self.assertTrue(wait(lambda: self.sd.opens >= 2, 2.0))
+                self.assertFalse(mic.devices_changed())
+            finally:
+                mic.stop()
 
 
 if __name__ == "__main__":

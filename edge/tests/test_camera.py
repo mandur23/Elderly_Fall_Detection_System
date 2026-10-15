@@ -1,13 +1,18 @@
+import math
 import os
+import sys
 import tempfile
 import threading
 import time
+import types
 import unittest
+from unittest import mock
 
 import cv2
 import numpy as np
 
-from edge.camera import Camera, OpenCVSource, RateLimiter, encode_jpeg, make_source, prepare_frame
+from edge.camera import (Camera, CameraError, OpenCVSource, PiCameraSource, RateLimiter, encode_jpeg, make_source,
+                         prepare_frame)
 from edge.tests.fakes import FakeLiveSource
 
 
@@ -127,6 +132,24 @@ class VideoFileTest(unittest.TestCase):
         self.assertEqual(stamps, sorted(stamps))
         self.assertTrue(ok)
 
+    def test_fps_change_does_not_restart_file(self):
+        opens = []
+
+        def opener(*args):
+            opens.append(args)
+            return make_source(*args)
+
+        camera = Camera("opencv", self.path, video={"fps": 30}, opener=opener)
+        camera.set_sink(Collector(), lambda: True)
+        camera.start()
+        try:
+            self.assertTrue(wait(lambda: camera.frames_read > 2, 2.0))
+            camera.apply({"fps": 5})               # 파일은 파일 속도대로 읽으므로 처음부터 다시 열지 않는다
+            time.sleep(0.2)
+            self.assertEqual(len(opens), 1)
+        finally:
+            camera.stop()
+
     def test_missing_file_reports_error(self):
         camera = Camera("opencv", os.path.join(self.tmp.name, "none.avi"), retry_delays=(0.1,))
         camera.start()
@@ -192,6 +215,93 @@ class CameraRecoveryTest(unittest.TestCase):
             self.assertEqual(sizes[-1], (320, 240))
         finally:
             camera.stop()
+
+    def test_fps_change_reopens_with_new_rate(self):
+        """카메라는 열 때 정한 fps로 찍으므로 서버가 fps를 바꾸면 그 fps로 다시 연다."""
+        opened = []
+
+        def opener(backend, source, width, height, fps):
+            opened.append(fps)
+            return FakeLiveSource()
+
+        camera = Camera("opencv", None, opener=opener, video={"fps": 10})
+        camera.set_sink(Collector(), lambda: True)
+        camera.start()
+        try:
+            self.assertTrue(wait(lambda: camera.frames_read > 2, 2.0))
+            camera.apply({"fps": 10.0})               # 같은 값이면 다시 열지 않는다
+            time.sleep(0.2)
+            self.assertEqual(opened, [10])
+            camera.apply({"fps": 15.0})
+            self.assertTrue(wait(lambda: len(opened) == 2, 2.0))
+            self.assertEqual(opened[-1], 15.0)
+        finally:
+            camera.stop()
+
+    def test_thread_survives_unexpected_error(self):
+        """예상하지 못한 오류(여기서는 close 실패)가 나도 스레드가 죽지 않고 다시 연다."""
+        sources = []
+
+        class BrokenClose(FakeLiveSource):
+            def close(self):
+                super().close()
+                raise RuntimeError("close 실패")
+
+        def opener(*args):
+            sources.append(BrokenClose(fps=50, fail_after=3) if not sources else FakeLiveSource(fps=50))
+            return sources[-1]
+
+        camera = Camera("opencv", None, opener=opener, retry_delays=(0.05,), stall_seconds=0.2, video={"fps": 50})
+        camera.set_sink(Collector(), lambda: True)
+        with self.assertLogs("edge.camera", level="ERROR") as logs:
+            camera.start()
+            try:
+                self.assertTrue(wait(lambda: camera.opens >= 2 and camera.status()[0], 3.0))
+                self.assertLess(camera.stalled_for(), 1.0)
+            finally:
+                camera.stop()
+        self.assertTrue(any("카메라 스레드 오류" in line for line in logs.output), logs.output)
+
+    def test_stalled_for_dead_thread(self):
+        camera = Camera("opencv", None, opener=lambda *a: FakeLiveSource())
+        self.assertEqual(camera.stalled_for(), 0.0)                 # 시작하지 않음
+        camera._thread = threading.Thread(target=lambda: None)     # 시작했지만 끝나 버린 스레드
+        camera._thread.start()
+        camera._thread.join()
+        self.assertTrue(math.isinf(camera.stalled_for()))
+        camera._thread = None
+
+
+class PiCameraSourceTest(unittest.TestCase):
+    def test_closes_camera_when_configure_fails(self):
+        cams = []
+
+        class FakePicamera2:
+            def __init__(self, num):
+                self.closed = False
+                cams.append(self)
+
+            def create_video_configuration(self, **kwargs):
+                return kwargs
+
+            def configure(self, cfg):
+                raise RuntimeError("설정 실패")
+
+            def start(self):
+                pass
+
+            def close(self):
+                self.closed = True
+
+        fake = types.ModuleType("picamera2")
+        fake.Picamera2 = FakePicamera2
+        with mock.patch.dict(sys.modules, {"picamera2": fake}):
+            source = PiCameraSource(0, 640, 480, 10)
+            with self.assertRaises(CameraError):
+                source.open()
+        self.assertEqual(len(cams), 1)
+        self.assertTrue(cams[0].closed, "실패한 카메라를 닫아야 다시 열 수 있습니다")
+        self.assertIsNone(source._cam)
 
     def test_no_encoding_when_not_wanted(self):
         collector = Collector()

@@ -2,11 +2,12 @@ import io
 import os
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
 from edge.config import ConfigError, EdgeConfig, build_parser, load, parse_source, server_urls
 from edge.main import main
+from shared import protocol
 
 
 class ServerUrlTest(unittest.TestCase):
@@ -88,11 +89,25 @@ class LoadTest(unittest.TestCase):
         out = io.StringIO()
         with redirect_stdout(out):
             self.assertEqual(main(["--config", str(self.path), "--print-url", "kiosk"]), 0)
-        self.assertEqual(out.getvalue().strip(), "http://10.0.0.5:8000/kiosk")
+        key = protocol.kiosk_key("file-token", "living-room")   # 서버가 같은 토큰으로 계산하는 값
+        self.assertEqual(out.getvalue().strip(), f"http://10.0.0.5:8000/kiosk?device=living-room&key={key}")
         out = io.StringIO()
         with redirect_stdout(out):
             main(["--config", str(self.path), "--print-url", "health"])
         self.assertEqual(out.getvalue().strip(), "http://10.0.0.5:8000/api/health")
+
+    def test_kiosk_url_quotes_id_and_needs_token(self):
+        out = io.StringIO()
+        with redirect_stdout(out):
+            main(["--config", str(self.path), "--device-id", "거실 1/a", "--print-url", "kiosk"])
+        key = protocol.kiosk_key("file-token", "거실 1/a")
+        self.assertEqual(out.getvalue().strip(),
+                         f"http://10.0.0.5:8000/kiosk?device=%EA%B1%B0%EC%8B%A4%201%2Fa&key={key}")
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):   # 토큰이 없으면 키를 만들 수 없다 (kiosk.sh는 기다렸다 다시 봄)
+            self.assertEqual(main(["--config", str(self.path), "--token", "", "--print-url", "kiosk"]), 2)
+        self.assertEqual(out.getvalue(), "")
+        self.assertIn("토큰", err.getvalue())
 
 
 if __name__ == "__main__":

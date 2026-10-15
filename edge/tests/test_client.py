@@ -1,14 +1,20 @@
 """가짜 서버에 실제로 접속해 규약대로 주고받는지 확인한다."""
 
 import asyncio
+import math
+import socket
+import threading
 import time
+import types
 import unittest
+from unittest import mock
 
 import cv2
 import numpy as np
 
 from edge.camera import Camera
-from edge.client import EdgeClient, retry_delay
+from edge.client import (NOTSENT_LOWAT_BYTES, WRITE_BUFFER_HIGH, EdgeClient, FatalError, _ws_transport,
+                         limit_send_buffers, retry_delay)
 from edge.config import EdgeConfig
 from edge.speaker import NullSpeaker
 from edge.tests.fake_server import FakeServer, tone
@@ -120,6 +126,13 @@ class HandshakeAndVideoTest(EdgeTestCase):
         self.assertFalse(self.client._wants_frame())   # 카메라 스레드는 인코딩도 하지 않는다
         self.client._sending_video = False
 
+    async def test_small_send_buffer(self):
+        """보내지 못한 장면이 asyncio 버퍼에 쌓이지 않게 쓰기 버퍼 한도를 낮춘다."""
+        await self.connected()
+        transport = _ws_transport(self.client._ws)
+        self.assertIsNotNone(transport)
+        self.assertEqual(transport.get_write_buffer_limits()[1], WRITE_BUFFER_HIGH)
+
 
 class MicTest(EdgeTestCase):
     async def test_mic_only_when_enabled(self):
@@ -152,6 +165,7 @@ class PlaybackTest(EdgeTestCase):
         received, done = self.server.done[0]
         self.assertEqual(done, {"type": "playback_done", "id": "p1"})
         self.assertGreaterEqual(received - start, 0.25)
+        await self.until(lambda: not self.client._send_tasks, message="보낸 작업이 남아 있습니다")
 
     async def test_numeric_id_and_sequential_clips(self):
         await self.connected()
@@ -262,6 +276,125 @@ class NoWelcomeTest(EdgeTestCase):
         self.client.stop()                       # welcome을 기다리는 중에도 바로 끝나야 한다
         await asyncio.wait_for(self.task, 2.0)
         self.assertLess(time.monotonic() - started, 1.0)
+
+
+class _Sock:
+    def __init__(self, error=None):
+        self.calls, self.error = [], error
+
+    def setsockopt(self, *args):
+        self.calls.append(args)
+        if self.error is not None:
+            raise self.error
+
+
+class _Transport:
+    high = None
+
+    def set_write_buffer_limits(self, high=None, low=None):
+        self.high = high
+
+
+def _fake_ws(sock, transport):
+    ws = types.SimpleNamespace(get_extra_info=lambda name, default=None: sock if name == "socket" else default)
+    ws._response = types.SimpleNamespace(connection=types.SimpleNamespace(transport=transport))
+    return ws
+
+
+class LimitSendBuffersTest(unittest.TestCase):
+    def test_notsent_lowat_and_write_buffer(self):
+        sock, transport = _Sock(), _Transport()
+        with mock.patch("edge.client._TCP_NOTSENT_LOWAT", 25):   # 리눅스
+            self.assertIs(limit_send_buffers(_fake_ws(sock, transport)), transport)
+        self.assertEqual(sock.calls, [(socket.IPPROTO_TCP, 25, NOTSENT_LOWAT_BYTES)])
+        self.assertEqual(transport.high, WRITE_BUFFER_HIGH)
+
+    def test_unsupported_platform_is_ignored(self):
+        sock = _Sock(OSError("지원하지 않는 옵션"))
+        with mock.patch("edge.client._TCP_NOTSENT_LOWAT", 25):
+            self.assertIsNone(limit_send_buffers(_fake_ws(sock, None)))   # 오류가 나도 접속은 계속한다
+        self.assertEqual(len(sock.calls), 1)
+        with mock.patch("edge.client._TCP_NOTSENT_LOWAT", None):        # 상수가 없는 OS(윈도우 등)
+            limit_send_buffers(_fake_ws(sock, None))
+        self.assertEqual(len(sock.calls), 1)
+        self.assertIsNone(limit_send_buffers(types.SimpleNamespace(get_extra_info=lambda *a: None)))
+
+
+class FatalProblemTest(unittest.TestCase):
+    """다시 시작해야만 고칠 수 있는 장치 문제 판단."""
+
+    def setUp(self):
+        self.camera, self.mic, self.speaker = Camera("none"), FakeMicrophone(), NullSpeaker()
+        cfg = EdgeConfig(server="127.0.0.1", token=TOKEN, device_id="test-pi")
+        self.client = EdgeClient(cfg, self.camera, self.mic, self.speaker, camera_hang_exit=60.0, audio_fail_exit=60.0)
+
+    @staticmethod
+    def broken(part, seconds=61.0, changed=True):
+        part.failing_for = lambda: seconds
+        part.devices_changed = lambda: changed
+
+    def test_healthy(self):
+        self.assertIsNone(self.client.fatal_problem())
+
+    def test_camera_hang_and_dead_thread(self):
+        self.camera.stalled_for = lambda: 61.0
+        self.assertIn("61초", self.client.fatal_problem())
+        del self.camera.stalled_for
+        self.camera._thread = threading.Thread(target=lambda: None)
+        self.camera._thread.start()
+        self.camera._thread.join()
+        self.assertIn("카메라 스레드", self.client.fatal_problem())
+        self.camera._thread = None
+
+    def test_replugged_audio_device(self):
+        self.broken(self.mic, 30.0)
+        self.assertIsNone(self.client.fatal_problem(), "60초 전에는 끝내지 않는다")
+        self.broken(self.mic, 61.0, changed=False)
+        self.assertIsNone(self.client.fatal_problem(), "사운드 카드가 그대로면 다시 시작해도 같다")
+        self.broken(self.mic)
+        self.assertIn("마이크", self.client.fatal_problem())
+        self.broken(self.mic, 0.0)
+        self.broken(self.speaker)
+        self.assertIn("스피커", self.client.fatal_problem())
+
+    def test_waits_for_playback_and_voice_check(self):
+        self.broken(self.mic)
+        self.speaker.begin("voice")                 # 재생 중(스피커는 정상)
+        self.assertIsNone(self.client.fatal_problem())
+        self.speaker.stop(notify=False)
+        self.assertIn("마이크", self.client.fatal_problem())
+
+        self.broken(self.mic, 0.0)
+        self.broken(self.speaker)
+        self.client._mic_enabled = True             # 음성 확인 중(마이크는 정상)
+        self.assertIsNone(self.client.fatal_problem())
+        self.client._mic_enabled = False
+        self.speaker.begin("stuck")                 # 스피커가 고장이면 남은 소리가 막지 않는다
+        self.speaker.status = lambda: (False, "스피커를 열 수 없습니다")
+        self.assertIn("스피커", self.client.fatal_problem())
+
+
+class WatchdogTest(unittest.IsolatedAsyncioTestCase):
+    async def test_exits_while_disconnected(self):
+        """서버에 접속하지 못하는 동안에도 장치 감시가 돌아 run()이 FatalError로 끝난다."""
+        server = FakeServer(token=TOKEN)
+        await server.start()
+        try:
+            cfg = EdgeConfig(server=server.address, token="wrong", device_id="test-pi")   # 접속 거절
+            camera, mic, speaker = Camera("none"), FakeMicrophone(), NullSpeaker()
+            client = EdgeClient(cfg, camera, mic, speaker, retry_delays=RETRY, watchdog_interval=0.05)
+            with self.assertLogs("edge.client", level="WARNING"):
+                task = asyncio.create_task(client.run())
+                await server.wait_until(lambda: server.auth_failures >= 1, 3.0)
+                await asyncio.sleep(0.2)
+                self.assertFalse(task.done())
+                camera.stalled_for = lambda: math.inf   # 카메라 스레드가 죽음
+                with self.assertRaises(FatalError) as ctx:
+                    await asyncio.wait_for(task, 2.0)
+            self.assertIn("카메라", str(ctx.exception))
+            self.assertFalse(client.connected)
+        finally:
+            await server.stop()
 
 
 class RetryDelayTest(unittest.TestCase):

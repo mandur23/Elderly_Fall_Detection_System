@@ -13,6 +13,8 @@ ExecStart=__INSTALL_DIR__/.venv/bin/python -m edge
 # 서버 연결이 끊기면 프로그램이 스스로 다시 접속한다. 프로그램이 끝나면(카메라 드라이버 정지 등) 다시 띄운다.
 Restart=always
 RestartSec=3
+# 설정 오류(종료 코드 2)는 다시 띄워도 같으므로 멈춘다. config.toml을 고친 뒤 systemctl --user restart fall-edge
+RestartPreventExitStatus=2
 TimeoutStopSec=10
 NoNewPrivileges=true
 

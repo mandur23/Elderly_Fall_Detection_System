@@ -1,0 +1,6 @@
+# PC 서버 (Python 3.11 이상)
+aiohttp>=3.9                 # WebSocket과 HTTP를 함께 제공, 텔레그램 전송
+numpy>=1.24
+mediapipe>=0.10.14           # Pose Landmarker (Tasks API). opencv-contrib-python을 함께 설치함
+opencv-contrib-python>=4.8   # JPEG 디코딩 (mediapipe가 쓰는 것과 같은 패키지. opencv-python을 따로 설치하지 말 것)
+vosk>=0.3.45                 # 오프라인 음성 인식

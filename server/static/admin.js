@@ -505,6 +505,109 @@ $("guardian-form").addEventListener("submit", async (e) => {
 });
 $("guardian-cancel").addEventListener("click", resetGuardianForm);
 
+// --- 라즈베리파이 추가 (한 줄 설치 명령) ---
+// 서버가 만든 명령(장치 토큰 포함)에 장치 이름·id를 붙여 보인다. 토큰이 늘 화면에 보이지 않게 펼쳤을 때만 불러온다.
+const EDGE_ID_RE = /^[A-Za-z0-9._-]{1,64}$/;  // edge/deploy/setup.sh와 같은 규칙
+let edgeSetup = null;  // { server_url, version, token, command }
+let edgeSeq = 0;       // 늦게 도착한 옛 응답이 새 응답을 덮지 않게
+
+// bash 작은따옴표 문자열로 감싼다 (안의 ' 는 '\'' 로). 이름에 한글·공백·따옴표가 있어도 그대로 전달된다.
+function shellQuote(text) {
+  return "'" + String(text).replace(/'/g, "'\\''") + "'";
+}
+
+function setEdgeError(text) {
+  const err = $("edge-setup-error");
+  err.textContent = text || "";
+  err.classList.toggle("hidden", !text);
+}
+
+function renderEdgeCommand() {
+  const box = $("edge-command");
+  const copy = $("edge-copy");
+  setText($("edge-copy-result"), "");
+  if (!edgeSetup) {
+    copy.disabled = true;
+    return;
+  }
+  const form = $("edge-setup-form");
+  const name = form.elements.name.value.trim();
+  const id = form.elements.id.value.trim();
+  if (id && !EDGE_ID_RE.test(id)) {
+    setEdgeError("장치 id는 영문·숫자·점(.)·밑줄(_)·하이픈(-)으로 64자까지 쓸 수 있습니다.");
+    box.value = "";
+    copy.disabled = true;
+    return;
+  }
+  setEdgeError("");
+  let command = edgeSetup.command ||
+    `curl -fsSL ${edgeSetup.server_url}/edge/setup.sh | bash -s -- --token ${shellQuote(edgeSetup.token)}`;
+  if (name) command += " --name " + shellQuote(name);
+  if (id) command += " --id " + shellQuote(id);
+  box.value = command;
+  copy.disabled = false;
+}
+
+async function loadEdgeSetup() {
+  const seq = ++edgeSeq;
+  let problem = "";
+  let data = null;
+  try {
+    const res = await adminFetch("/api/admin/edge-setup", {}, FETCH_TIMEOUT_MS);
+    if (res.status === 401 || seq !== edgeSeq) return;
+    const d = res.data;
+    if (res.ok && d && (typeof d.command === "string" || (d.server_url && d.token))) {
+      data = d;
+    } else if (res.status === 404) {
+      problem = "이 서버는 라즈베리파이 한 줄 설치를 지원하지 않습니다. 서버를 업데이트해 주세요.";
+    } else {
+      problem = `설치 명령을 불러오지 못했습니다 (${res.status}).`;
+    }
+  } catch (err) {
+    if (seq !== edgeSeq) return;
+    problem = "설치 명령 요청 실패: " + failText(err);
+  }
+  edgeSetup = data;
+  setText($("edge-version"), data ? data.version || "알 수 없음" : "-");
+  if (!data) {
+    $("edge-command").value = "";
+    setEdgeError(problem);
+  }
+  renderEdgeCommand();
+}
+
+async function copyEdgeCommand() {
+  const box = $("edge-command");
+  let copied = false;
+  if (navigator.clipboard && window.isSecureContext) {
+    try {
+      await navigator.clipboard.writeText(box.value);
+      copied = true;
+    } catch (err) {
+      copied = false;
+    }
+  }
+  if (!copied) {
+    // 서버를 http(보안 연결 아님)로 열면 clipboard API가 없어, 글자를 골라 두고 브라우저 복사를 쓴다.
+    box.focus();
+    box.select();
+    try {
+      copied = document.execCommand("copy");
+    } catch (err) {
+      copied = false;
+    }
+  }
+  setText($("edge-copy-result"), copied ? "복사했습니다. 라즈베리파이 터미널에 붙여 넣으세요."
+    : "명령을 선택해 두었습니다. Ctrl+C로 복사하세요.");
+}
+
+$("edge-setup").addEventListener("toggle", () => {
+  if ($("edge-setup").open) loadEdgeSetup();  // 펼칠 때마다 새로 읽는다 (서버 주소·버전이 바뀌었을 수 있음)
+});
+$("edge-setup-form").addEventListener("input", renderEdgeCommand);
+$("edge-setup-form").addEventListener("submit", (e) => e.preventDefault());
+$("edge-copy").addEventListener("click", copyEdgeCommand);
+
 function tickClock() {
   const d = new Date();
   $("clock").textContent = [d.getHours(), d.getMinutes(), d.getSeconds()]

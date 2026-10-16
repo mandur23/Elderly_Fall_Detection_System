@@ -16,6 +16,8 @@
   POST /api/admin/clear?device=   관리자 해제 (X-Admin-Action: 1 헤더 필요)
   GET/POST /api/admin/guardians, POST/DELETE /api/admin/guardians/<id>   보호자 계정 관리
   DELETE /api/admin/devices/<id>  연결이 끊긴 장치를 목록에서 지우기
+  GET  /api/admin/edge-setup      라즈베리파이 설치 명령 (관리자 화면 '라즈베리파이 추가')
+  GET  /edge/setup.sh, /edge/version, /edge/bundle.tar.gz   라즈베리파이 설치·업데이트 (server/edge_dist.py)
   GET  /g                         보호자 웹 (맡은 장치만, 휴대폰 화면)
   GET/POST /g/login, POST /g/logout
   GET  /api/g/overview            보호자 웹 데이터
@@ -37,6 +39,7 @@ import html
 import json
 import logging
 import secrets
+import shlex
 import time
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional
@@ -46,6 +49,7 @@ from aiohttp import WSMsgType, web
 
 from server.config import SERVER_DIR, Settings
 from server.device import DeviceDisconnected, DeviceLink, DeviceRegistry
+from server.edge_dist import Bundle, build_bundle, lan_ip, setup_script
 from server.events import (ALARM, CLEARED_BY_ADMIN, CLEARED_BY_BUTTON, CLEARED_BY_GUARDIAN, SERVER_KEY, SUSPECT,
                            EventService)
 from server.fall import FallParams
@@ -76,6 +80,9 @@ LOCAL_HOSTS = ("localhost", "127.0.0.1", "::1")
 GUARDIAN_HEADER = "X-Guardian-Action"
 GUARDIAN_COOKIE = "fall_guardian"
 VIEW_ORDER = {"alarm": 0, "suspect": 1, "disconnected": 2, "check": 3, "normal": 4}
+NO_COUNTS = {"events": 0, "alarms": 0}
+STATUS_FIELDS = ("camera_ok", "mic_ok", "speaker_ok", "fps", "cpu_temp_c", "uptime_s")
+NO_STORE = {"Cache-Control": "no-store"}
 _dumps = functools.partial(json.dumps, ensure_ascii=False)
 
 
@@ -160,6 +167,7 @@ class FallServer:
         self.started_at = time.monotonic()
         self._admin_secret = b""  # 관리자 세션을 비밀번호와 묶는 키 (기록 파일에 두어 재시작해도 로그인 유지)
         self.guardians: Optional[Guardians] = None
+        self.edge_bundle: Optional[Bundle] = None  # 라즈베리파이에 내려줄 코드 묶음
         self.login_limiter = LoginLimiter()
         self.admin_limiter = LoginLimiter(by_user=False)
 
@@ -183,6 +191,10 @@ class FallServer:
             web.post("/api/admin/guardians/{gid:\\d+}", self.api_admin_guardian_update),
             web.delete("/api/admin/guardians/{gid:\\d+}", self.api_admin_guardian_delete),
             web.delete("/api/admin/devices/{device_id}", self.api_admin_forget_device),
+            web.get("/api/admin/edge-setup", self.api_admin_edge_setup),
+            web.get("/edge/setup.sh", self.edge_setup_script),
+            web.get("/edge/version", self.edge_version),
+            web.get("/edge/bundle.tar.gz", self.edge_bundle_file),
             web.get("/g", self.guardian_page),
             web.get("/g/login", self.guardian_login_page),
             web.post("/g/login", self.guardian_login),
@@ -208,6 +220,11 @@ class FallServer:
         # 서버를 다시 켜도 전에 접속했던 장치를 기억해, 다시 붙지 않으면 '연결 끊김'으로 보이고 알린다.
         for row in self.store.list_devices():
             self.devices.remember(row["device_id"], row["name"], row["last_seen"])
+        try:
+            self.edge_bundle = await asyncio.to_thread(build_bundle)
+            log.info("라즈베리파이 코드 묶음 %s (파일 %d개)", self.edge_bundle.version, self.edge_bundle.files)
+        except OSError as e:  # edge/ 폴더 없이 서버만 둔 설치 등
+            log.warning("라즈베리파이 코드 묶음을 만들지 못했습니다 (설치·자동 업데이트 불가): %s", e)
         log.info("자세 추정 모델 불러오는 중: %s", getattr(self.pose_factory, "model_path", self.pose_factory.name))
         await asyncio.to_thread(self.pose_factory.load)
         if self.pose_factory.error:
@@ -352,7 +369,8 @@ class FallServer:
                 pipeline.new_session()
                 pipeline.start()
 
-            await link.send(P.WELCOME, protocol=P.PROTOCOL_VERSION, video=self.s.video, name=name)
+            extra = {"edge_version": self.edge_bundle.version} if self.edge_bundle else {}
+            await link.send(P.WELCOME, protocol=P.PROTOCOL_VERSION, video=self.s.video, name=name, **extra)
             log.info("[%s] 장치 접속 (%s, %s, 소프트웨어 %s)", device_id, remote, name, hello.get("software", "-"))
             await self.events.on_device_connected(link)
         except BaseException:
@@ -410,7 +428,7 @@ class FallServer:
     async def kiosk(self, request: web.Request) -> web.Response:
         page = (STATIC_DIR / "kiosk.html").read_text(encoding="utf-8")
         page = page.replace("{{PROMPT_TEXT}}", html.escape(self.s.prompt_text))
-        return web.Response(text=page, content_type="text/html", headers={"Cache-Control": "no-store"})
+        return web.Response(text=page, content_type="text/html", headers=NO_STORE)
 
     async def health(self, request: web.Request) -> web.Response:
         return _json({"ok": True, "protocol": P.PROTOCOL_VERSION,
@@ -451,56 +469,56 @@ class FallServer:
             return "disconnected"
         return "check" if problems else "normal"
 
-    def _device_items(self) -> List[Dict]:
-        items = []
-        for device_id in self._device_ids():
-            link = self.devices.links.get(device_id)
-            info = self.devices.known.get(device_id, {})
-            item = {"device_id": device_id, "name": self.events.device_label(device_id),
-                    "connected": link is not None, "since": info.get("since"),
-                    "state": self.events.state_of(device_id)}
+    def _device_card(self, device_id: str, problems: List[str], counts: Optional[Dict] = None,
+                     detail: bool = False) -> Dict:
+        """화면에 보여 줄 장치 하나 (현장 화면·관리자·보호자 공통). detail이면 장치 상태 보고와 영상 처리 수치도."""
+        link = self.devices.links.get(device_id)
+        card = {"device_id": device_id, "name": self.events.device_label(device_id), "connected": link is not None,
+                "since": self.devices.known.get(device_id, {}).get("since"), "state": self.events.state_of(device_id),
+                "view": self._device_view(device_id, problems), "problems": problems,
+                "event": self.events.event_snapshot(device_id)}
+        if counts is not None:
+            card["last_24h"] = counts.get(device_id, NO_COUNTS)
+        if detail:
             if link is not None:
-                st = link.status
-                item.update({k: st.get(k) for k in ("camera_ok", "mic_ok", "speaker_ok", "fps", "cpu_temp_c",
-                                                    "uptime_s")})
-                item["software"] = link.hello.get("software")
+                card.update({k: link.status.get(k) for k in STATUS_FIELDS}, software=link.hello.get("software"))
             pipeline = self.pipelines.get(device_id)
             if pipeline is not None:
-                item.update(pipeline.snapshot())
-            items.append(item)
-        return items
+                card.update(pipeline.snapshot())
+        return card
+
+    def _counts_24h(self) -> Dict[str, Dict[str, int]]:
+        return self.store.counts_since(now_iso(datetime.now() - timedelta(days=1)))
 
     def state_snapshot(self, device_id: Optional[str] = None) -> Dict:
         """현장 화면용. device_id 장치 하나의 상태. 장치가 한 대뿐이면 device_id를 생략해도 그 장치."""
-        now = time.monotonic()
+        subjects = self.events.problems_by_subject(time.monotonic())
+        server_problems = subjects.pop(SERVER_KEY)
         ids = self._device_ids()
         if device_id is None and len(ids) == 1:
             device_id = ids[0]
-        common = {
-            "devices": self._device_items(),
-            "notifier_enabled": self.notifier.enabled,
-            "prompt_source": self._prompt_sound.source if self._prompt_sound else None,
-        }
+        common = {"notifier_enabled": self.notifier.enabled,
+                  "prompt_source": self._prompt_sound.source if self._prompt_sound else None}
         if device_id is None:
             # 장치가 없거나 여러 대인데 어느 장치인지 모름: 현장 화면은 ?device=로 장치를 정해야 한다.
             # (관리자만 여기 온다. 장치 목록에 각 장치의 현장 화면 주소를 붙인다.)
-            common["devices"] = [{**d, "kiosk_url": self.kiosk_url(d["device_id"])} for d in common["devices"]]
-            return {**common, "device_id": None, "state": self.events.state,
+            devices = [{**self._device_card(d, subjects.get(d, []), detail=True), "kiosk_url": self.kiosk_url(d)}
+                       for d in ids]
+            return {**common, "devices": devices, "device_id": None, "state": self.events.state,
                     "view": "select" if ids else "disconnected", "event": None,
-                    "problems": self.events.problems(now), "location": self.s.device_name,
+                    "problems": self.events.problems(), "location": self.s.device_name,
                     "device_alert_sent": self.events.device_alert_sent}
-        problems = self.events.problems(now, device_id)
-        # 한 방의 현장 화면에는 다른 방의 정보를 보내지 않는다.
-        common["devices"] = [d for d in common["devices"] if d["device_id"] == device_id]
-        return {**common, "device_id": device_id, "state": self.events.state_of(device_id),
-                "view": self._device_view(device_id, problems), "event": self.events.event_snapshot(device_id),
-                "problems": problems, "location": self.events.device_label(device_id),
-                "device_alert_sent": self.events.alert_sent_for(device_id)}
+        # 한 방의 현장 화면에는 다른 방의 정보를 보내지 않는다. 서버 공통 문제(모델 등)도 그 방의 감지를 막으므로
+        # 함께 보여 준다.
+        card = self._device_card(device_id, server_problems + subjects.get(device_id, []), detail=True)
+        return {**common, "devices": [card], "device_id": device_id, "state": card["state"], "view": card["view"],
+                "event": card["event"], "problems": card["problems"],
+                "location": card["name"], "device_alert_sent": self.events.alert_sent_for(device_id)}
 
     async def api_state(self, request: web.Request) -> web.Response:
         device_id = request.query.get("device") or None
         self._require_kiosk(request, device_id)
-        return _json(self.state_snapshot(device_id), headers={"Cache-Control": "no-store"})
+        return _json(self.state_snapshot(device_id), headers=NO_STORE)
 
     async def api_clear(self, request: web.Request) -> web.Response:
         # 다른 웹 페이지가 몰래 해제 요청을 보내지 못하게(CSRF) 화면 스크립트만 붙이는 헤더를 요구한다.
@@ -552,7 +570,7 @@ class FallServer:
     @staticmethod
     def _page(name: str) -> web.Response:
         page = (STATIC_DIR / name).read_text(encoding="utf-8")
-        return web.Response(text=page, content_type="text/html", headers={"Cache-Control": "no-store"})
+        return web.Response(text=page, content_type="text/html", headers=NO_STORE)
 
     async def admin_page(self, request: web.Request) -> web.StreamResponse:
         if not self._admin_ok(request):
@@ -600,17 +618,9 @@ class FallServer:
     def admin_overview(self) -> Dict:
         now = time.monotonic()
         subjects = self.events.problems_by_subject(now)
-        counts = self.store.counts_since(now_iso(datetime.now() - timedelta(days=1)))
-        devices = []
-        for item in self._device_items():
-            device_id = item["device_id"]
-            problems = subjects.get(device_id, [])
-            item.update(view=self._device_view(device_id, problems), problems=problems,
-                        kiosk_url=self.kiosk_url(device_id),
-                        event=self.events.event_snapshot(device_id),
-                        alert_sent=self.events.alert_sent_for(device_id),
-                        last_24h=counts.get(device_id, {"events": 0, "alarms": 0}))
-            devices.append(item)
+        counts = self._counts_24h()
+        devices = [{**self._device_card(d, subjects.get(d, []), counts, detail=True), "kiosk_url": self.kiosk_url(d),
+                    "alert_sent": self.events.alert_sent_for(d)} for d in self._device_ids()]
         devices.sort(key=lambda d: VIEW_ORDER.get(d["view"], 9))
         views = [d["view"] for d in devices]
         return {
@@ -637,7 +647,7 @@ class FallServer:
     async def api_admin_overview(self, request: web.Request) -> web.Response:
         if not self._admin_ok(request):
             raise web.HTTPUnauthorized(text="admin login required")
-        return _json(self.admin_overview(), headers={"Cache-Control": "no-store"})
+        return _json(self.admin_overview(), headers=NO_STORE)
 
     async def api_admin_clear(self, request: web.Request) -> web.Response:
         if not self._admin_ok(request):
@@ -677,7 +687,7 @@ class FallServer:
     async def api_admin_guardians(self, request: web.Request) -> web.Response:
         self._require_admin(request)
         return _json({"guardians": self.guardians.list(), "devices": [
-            {"device_id": d["device_id"], "name": d["name"]} for d in self._device_items()]})
+            {"device_id": d, "name": self.events.device_label(d)} for d in self._device_ids()]})
 
     async def api_admin_guardian_create(self, request: web.Request) -> web.Response:
         self._require_admin(request, action=True)
@@ -731,6 +741,45 @@ class FallServer:
         log.info("[%s] 관리자가 장치를 목록에서 지웠습니다 (%s)", device_id, _client_ip(request))
         return _json({"forgotten": True})
 
+    # --- HTTP: 라즈베리파이 설치·업데이트 (server/edge_dist.py) ---
+    def _server_url(self, request: web.Request) -> str:
+        """라즈베리파이가 이 서버에 닿는 주소. 라즈베리파이가 직접 연 요청이면 그 주소를 그대로 쓰고,
+        서버 PC에서 연 관리자 화면(127.0.0.1)이나 터널을 거친 요청이면 공유기 쪽 주소를 쓴다."""
+        host = _host_name(request.host)
+        if host and host not in LOCAL_HOSTS and not any(h in request.headers for h in FORWARD_HEADERS):
+            return f"http://{request.host}"
+        return f"http://{lan_ip()}:{self.s.port}"
+
+    def _require_bundle(self) -> Bundle:
+        if self.edge_bundle is None:
+            raise web.HTTPServiceUnavailable(text="edge bundle is not available on this server")
+        return self.edge_bundle
+
+    async def edge_setup_script(self, request: web.Request) -> web.Response:
+        script = setup_script(self._server_url(request))
+        if script is None:
+            raise web.HTTPNotFound(text="edge/deploy/setup.sh not found")
+        return web.Response(text=script, content_type="text/x-shellscript", headers=NO_STORE)
+
+    async def edge_version(self, request: web.Request) -> web.Response:
+        return web.Response(text=self._require_bundle().version, headers=NO_STORE)
+
+    async def edge_bundle_file(self, request: web.Request) -> web.Response:
+        if not self._authorized(request):  # 장치 토큰을 아는 라즈베리파이만
+            raise web.HTTPUnauthorized(text="invalid device token")
+        bundle = self._require_bundle()
+        return web.Response(body=bundle.data, content_type="application/gzip", headers={
+            **NO_STORE, "Content-Disposition": f'attachment; filename="fall-edge-{bundle.version}.tar.gz"'})
+
+    async def api_admin_edge_setup(self, request: web.Request) -> web.Response:
+        """관리자 화면 '라즈베리파이 추가': 라즈베리파이 터미널에 붙여 넣을 설치 명령 (장치 토큰 포함)."""
+        self._require_admin(request)
+        url = self._server_url(request)
+        return _json({"server_url": url, "version": self.edge_bundle.version if self.edge_bundle else None,
+                      "token": self.s.device_token,
+                      "command": f"curl -fsSL {url}/edge/setup.sh | bash -s -- --token {shlex.quote(self.s.device_token)}"},
+                     headers=NO_STORE)
+
     # --- HTTP: 보호자 웹 ---
     def _guardian(self, request: web.Request) -> Optional[Dict]:
         return self.guardians.from_session(request.cookies.get(GUARDIAN_COOKIE, ""))
@@ -771,28 +820,14 @@ class FallServer:
         raise res
 
     def guardian_overview(self, guardian: Dict) -> Dict:
-        now = time.monotonic()
-        subjects = self.events.problems_by_subject(now)
-        counts = self.store.counts_since(now_iso(datetime.now() - timedelta(days=1)))
+        subjects = self.events.problems_by_subject(time.monotonic())
+        counts = self._counts_24h()
         known = set(self._device_ids())
-        devices = []
-        for device_id in guardian["devices"]:
-            if device_id not in known:
-                devices.append({"device_id": device_id, "name": device_id, "connected": False, "since": None,
-                                "view": "disconnected", "event": None, "last_24h": {"events": 0, "alarms": 0},
-                                "problems": ["아직 한 번도 연결되지 않은 장치입니다"]})
-                continue
-            problems = subjects.get(device_id, [])
-            devices.append({
-                "device_id": device_id,
-                "name": self.events.device_label(device_id),
-                "connected": device_id in self.devices.links,
-                "since": self.devices.known.get(device_id, {}).get("since"),
-                "view": self._device_view(device_id, problems),
-                "event": self.events.event_snapshot(device_id),
-                "problems": problems,
-                "last_24h": counts.get(device_id, {"events": 0, "alarms": 0}),
-            })
+        devices = [self._device_card(d, subjects.get(d, []), counts) if d in known else
+                   {"device_id": d, "name": d, "connected": False, "since": None, "state": "NORMAL",
+                    "view": "disconnected", "event": None, "last_24h": NO_COUNTS,
+                    "problems": ["아직 한 번도 연결되지 않은 장치입니다"]}
+                   for d in guardian["devices"]]
         return {
             "guardian": {"name": guardian["name"], "username": guardian["username"],
                          "can_clear": guardian["can_clear"]},
@@ -806,7 +841,7 @@ class FallServer:
         guardian = self._guardian(request)
         if guardian is None:
             raise web.HTTPUnauthorized(text="login required")
-        return _json(self.guardian_overview(guardian), headers={"Cache-Control": "no-store"})
+        return _json(self.guardian_overview(guardian), headers=NO_STORE)
 
     async def api_guardian_clear(self, request: web.Request) -> web.Response:
         guardian = self._guardian(request)

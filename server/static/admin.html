@@ -78,6 +78,28 @@
       </div>
     </section>
 
+    <section>
+      <h2>라즈베리파이 추가 <span class="muted small">— 라즈베리파이 터미널에 명령 한 줄을 붙여 넣으면 설치부터 화면 자동 실행까지 끝납니다</span></h2>
+      <details id="edge-setup" class="edge-setup">
+        <summary>설치 명령 보기</summary>
+        <form id="edge-setup-form" class="edge-setup-form" autocomplete="off">
+          <label>장치 이름 <input name="name" maxlength="40" placeholder="예: 거실 (비우면 장치 id)"></label>
+          <label>장치 id (선택) <input name="id" maxlength="64" placeholder="비우면 라즈베리파이 컴퓨터 이름"></label>
+        </form>
+        <p id="edge-setup-error" class="error hidden"></p>
+        <div class="edge-command">
+          <textarea id="edge-command" rows="3" readonly spellcheck="false" aria-label="설치 명령">불러오는 중…</textarea>
+          <div class="form-actions">
+            <button type="button" id="edge-copy" class="primary" disabled>명령 복사</button>
+            <span id="edge-copy-result" class="muted small" role="status"></span>
+          </div>
+        </div>
+        <p class="muted small">서버의 edge 버전: <span id="edge-version">-</span> · 설치한 라즈베리파이는 켤 때마다 이 버전으로 맞춥니다.</p>
+        <p class="note">라즈베리파이의 터미널에서 실행하세요(일반 사용자로, sudo 없이). 이미 설치된 장치에서 다시 실행하면 설정은 그대로 두고 업데이트합니다.
+          이 명령에는 장치 토큰이 들어 있으니 다른 사람에게 보내거나 공유하지 마세요.</p>
+      </details>
+    </section>
+
     <p class="note">영상과 음성 원본은 이 화면에 보이지 않으며 서버에 저장하지 않습니다.</p>
   </main>
 

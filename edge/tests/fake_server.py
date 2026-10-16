@@ -30,10 +30,12 @@ def tone(seconds: float, freq: float = 440.0, amplitude: int = 800) -> bytes:
 
 class FakeServer:
     def __init__(self, token: str = "test-token", welcome_video: Optional[Dict[str, Any]] = None,
-                 host: str = "127.0.0.1", port: int = 0, welcome_protocol: int = protocol.PROTOCOL_VERSION):
+                 host: str = "127.0.0.1", port: int = 0, welcome_protocol: int = protocol.PROTOCOL_VERSION,
+                 welcome_extra: Optional[Dict[str, Any]] = None):
         self.token, self.host, self.port = token, host, port
         self.welcome_video = {**protocol.DEFAULT_VIDEO, **(welcome_video or {})}
         self.welcome_protocol = welcome_protocol
+        self.welcome_extra = dict(welcome_extra or {})   # welcome에 더 실을 항목 (예: edge_version)
         self.auto_welcome = True
         self.hellos: List[Dict[str, Any]] = []
         self.auth_headers: List[str] = []
@@ -93,7 +95,8 @@ class FakeServer:
                     self.hellos.append(data)
                     if self.auto_welcome:
                         await ws.send_str(protocol.encode(protocol.WELCOME, protocol=self.welcome_protocol,
-                                                          video=self.welcome_video, name="시험 서버"))
+                                                          video=self.welcome_video, name="시험 서버",
+                                                          **self.welcome_extra))
                     if self.on_connect is not None:
                         asyncio.ensure_future(self.on_connect(self))
                 elif kind == protocol.STATUS:

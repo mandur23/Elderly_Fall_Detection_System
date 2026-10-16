@@ -3,6 +3,8 @@
 접속 -> hello -> welcome(영상 설정 적용) -> 영상·상태 전송, 서버 명령(config, mic, play_*) 처리.
 끊기면 재생과 마이크 전송을 멈추고 1·2·5·10초(이후 10초) 간격으로 다시 접속한다. 규약은 shared/protocol.py.
 장치 감시는 접속 여부와 상관없이 돌며, 다시 시작해야만 고칠 수 있는 문제면 run()이 FatalError로 끝난다.
+welcome의 edge_version이 이 장치(edge/VERSION)와 다르면 영상을 보내기 전에 UpdateRequested로 끝난다
+(종료 코드 3 -> systemd가 다시 띄우며 python -m edge.update가 새 코드를 받는다. 판단은 edge/update.py).
 """
 
 import asyncio
@@ -22,6 +24,7 @@ from edge.camera import Camera
 from edge.config import EdgeConfig
 from edge.mic import Microphone
 from edge.speaker import Speaker
+from edge.update import VERSION_FILE, local_version, record_attempt, restart_reason
 from shared import protocol
 
 log = logging.getLogger("edge.client")
@@ -48,6 +51,11 @@ _VIDEO_LIMITS = {"width": (16, 4096), "height": (16, 4096), "fps": (1, 60), "jpe
 
 class FatalError(RuntimeError):
     """다시 접속해도 소용없는 문제. 프로그램을 끝낸다(systemd가 다시 띄운다)."""
+
+
+class UpdateRequested(FatalError):
+    """서버의 edge 버전이 달라 업데이트하려고 끝낸다. main이 종료 코드 3으로 끝내면 systemd가 다시 띄우며
+    ExecStartPre(python -m edge.update)가 새 코드를 받는다."""
 
 
 class _Closed(Exception):
@@ -131,11 +139,15 @@ class EdgeClient:
                  welcome_timeout: float = WELCOME_TIMEOUT,
                  camera_hang_exit: float = CAMERA_HANG_EXIT_SECONDS,
                  audio_fail_exit: float = AUDIO_FAIL_EXIT_SECONDS,
-                 watchdog_interval: float = WATCHDOG_SECONDS):
+                 watchdog_interval: float = WATCHDOG_SECONDS,
+                 version_file: Path = VERSION_FILE,
+                 attempt_file: Optional[Path] = None):
         self.config, self.camera, self.mic, self.speaker = config, camera, mic, speaker
         self.retry_delays, self.status_interval = tuple(retry_delays), status_interval
         self.heartbeat, self.welcome_timeout, self.camera_hang_exit = heartbeat, welcome_timeout, camera_hang_exit
         self.audio_fail_exit, self.watchdog_interval = audio_fail_exit, watchdog_interval
+        self.version_file = version_file    # 서버에서 받아 설치한 버전. 없으면 개발 폴더(업데이트하려고 끝내지 않음)
+        self.attempt_file = attempt_file    # 업데이트 시도 기록 (None이면 ~/.cache/fall-edge/update-attempt.json)
         self.connections = 0       # welcome까지 받은 접속 수
         self.frames_sent = 0
         self.frames_dropped = 0    # 이전 장면을 보내는 중이라 버린 장면
@@ -257,6 +269,10 @@ class EdgeClient:
                 await ws.close(code=protocol.CLOSE_PROTOCOL_ERROR)
                 raise protocol.ProtocolError(message)
             self._apply_video(welcome.get("video"))
+            reason = self._update_reason(welcome.get("edge_version"))
+            if reason:
+                await ws.close(code=aiohttp.WSCloseCode.GOING_AWAY)
+                raise UpdateRequested(reason)
             self._connected = True
             self.connections += 1
             log.info("서버 접속됨 (설치 위치: %s, 영상 %s)", welcome.get("name") or self.config.name or "-",
@@ -285,14 +301,29 @@ class EdgeClient:
             log.warning("서버 연결이 끊겼습니다 (닫기 코드 %s)", code)
         return True, code
 
+    def _update_reason(self, server_version: Any) -> Optional[str]:
+        """welcome의 edge_version이 이 장치와 달라 다시 시작해 업데이트해야 하면 그 이유. 없으면 None.
+
+        재생이나 음성 확인 중이면 하지 않는다(접속 직후라 보통은 아님). 업데이트가 계속 실패해도 30분 안에 같은 버전으로
+        다시 끝내지 않게 시도 기록을 먼저 남기고, 남기지 못하면 끝내지 않는다.
+        """
+        reason = restart_reason(server_version, version_file=self.version_file, attempt_file=self.attempt_file)
+        if reason is None or self._audio_in_use():
+            return None
+        if not record_attempt(str(server_version).strip(), "다시 시작 요청", self.attempt_file):
+            return None
+        return reason
+
     def _hello(self) -> str:
         video = self.camera.video
+        bundle = local_version(self.version_file)
         return protocol.encode(
             protocol.HELLO,
             protocol=protocol.PROTOCOL_VERSION,
             device_id=self.config.device_id,
             name=self.config.name,
-            software=f"fall-edge {__version__} (python {platform.python_version()}, {sys.platform})",
+            software=(f"fall-edge {__version__}{f' (edge {bundle})' if bundle else ''} "
+                      f"(python {platform.python_version()}, {sys.platform})"),
             video={"width": video["width"], "height": video["height"], "fps": video["fps"], "format": "jpeg"},
             audio={"rate": protocol.AUDIO_RATE, "channels": protocol.AUDIO_CHANNELS, "format": "s16le"},
         )

@@ -1,19 +1,23 @@
 """edge 설정: edge/config.toml(저장소에 올리지 않음) + 명령행 인자.
 
 명령행 인자가 설정 파일보다 우선한다. 설정 파일 형식은 edge/config.example.toml 참고.
+설치 스크립트는 save_settings(python -m edge --save-config)로 서버 주소·토큰·장치 id·이름만 바꾼다.
 """
 
 import argparse
+import os
+import re
 import socket
 import tomllib
 import urllib.parse
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 from shared import protocol
 
 DEFAULT_CONFIG_PATH = Path(__file__).with_name("config.toml")
+TOKEN_PLACEHOLDER = "__DEVICE_TOKEN__"   # config.example.toml의 토큰 자리. 채우지 않았으면 토큰이 없는 것으로 본다
 CAMERA_BACKENDS = ("auto", "picamera2", "opencv", "none")
 SPEAKER_BACKENDS = ("sounddevice", "null")
 ROTATIONS = (0, 90, 180, 270)
@@ -133,8 +137,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--volume", type=float, help="재생 음량 0.0~1.0 (기본 1.0)")
     p.add_argument("--log-level", choices=("DEBUG", "INFO", "WARNING", "ERROR"), help="로그 수준")
     p.add_argument("--list-devices", action="store_true", help="오디오 장치 목록을 보여 주고 끝냄")
-    p.add_argument("--print-url", choices=("ws", "http", "kiosk", "health"),
-                   help="설정된 서버 URL을 출력하고 끝냄 (키오스크 스크립트용)")
+    p.add_argument("--print-url", choices=("ws", "http", "kiosk", "health", "waiting"),
+                   help="설정된 서버 URL을 출력하고 끝냄 (키오스크 스크립트용). waiting은 켜자마자 여는 대기 화면 주소이며, "
+                        "설정이 틀리면 안내(error)가 붙은 주소를 출력하고 종료 코드 2")
+    p.add_argument("--save-config", action="store_true",
+                   help="--server, --token, --device-id, --name 값을 설정 파일(--config)에 저장하고 끝냄 "
+                        "(다른 설정과 주석은 그대로. 설치 스크립트용)")
     return p
 
 
@@ -153,7 +161,8 @@ def from_file(data: Dict[str, Any]) -> EdgeConfig:
     server, device = data.get("server", {}), data.get("device", {})
     camera, mic, speaker = data.get("camera", {}), data.get("microphone", {}), data.get("speaker", {})
     cfg.server = str(server.get("address", cfg.server))
-    cfg.token = str(server.get("token", cfg.token))
+    token = str(server.get("token", cfg.token))
+    cfg.token = "" if token == TOKEN_PLACEHOLDER else token
     cfg.device_id = str(device.get("id") or cfg.device_id)
     cfg.name = str(device.get("name", cfg.name))
     cfg.camera = str(camera.get("backend", cfg.camera))
@@ -197,3 +206,105 @@ def load(args: argparse.Namespace) -> EdgeConfig:
     if args.no_mic:
         cfg.mic = False
     return cfg
+
+
+# --- 설정 파일 고치기 (설치 스크립트용) ---
+_SECTION_RE = re.compile(r"^\s*\[\s*([A-Za-z0-9_-]+)\s*\]\s*(#.*)?$")
+_ANY_HEADER_RE = re.compile(r"^\s*\[")
+
+
+def toml_string(value: str) -> str:
+    """TOML 기본 문자열("...")로 만든다. 한글·공백은 그대로 두고 따옴표·역슬래시·제어 문자만 이스케이프한다."""
+    out = []
+    for ch in value:
+        if ch == "\\":
+            out.append("\\\\")
+        elif ch == '"':
+            out.append('\\"')
+        elif ord(ch) < 0x20 or ord(ch) == 0x7F:
+            out.append(f"\\u{ord(ch):04X}")
+        else:
+            out.append(ch)
+    return '"' + "".join(out) + '"'
+
+
+def _value_end(rest: str) -> int:
+    """'키 =' 뒤(rest)에서 값이 끝나는 위치. 그 뒤는 공백과 주석. 여러 줄 문자열이거나 알 수 없으면 -1."""
+    i = len(rest) - len(rest.lstrip())
+    if rest.startswith('"""', i) or rest.startswith("'''", i):
+        return -1
+    if rest[i:i + 1] == '"':
+        j = i + 1
+        while j < len(rest):
+            if rest[j] == "\\":
+                j += 2
+                continue
+            if rest[j] == '"':
+                return j + 1
+            j += 1
+        return -1
+    if rest[i:i + 1] == "'":
+        j = rest.find("'", i + 1)
+        return -1 if j < 0 else j + 1
+    j = rest.find("#", i)
+    return len(rest.rstrip()) if j < 0 else len(rest[:j].rstrip())
+
+
+def _set_line(lines: List[str], section: str, key: str, value: str) -> None:
+    """[section]의 key 줄을 바꾼다(줄 끝 주석은 그대로). 키가 없으면 섹션 끝에, 섹션이 없으면 파일 끝에 넣는다."""
+    entry = f"{key} = {toml_string(value)}"
+    headers = [(i, _SECTION_RE.match(line)) for i, line in enumerate(lines)]
+    start = next((i for i, m in headers if m and m.group(1) == section), None)
+    if start is None:
+        if lines and lines[-1].strip():
+            lines.append("")
+        lines.extend([f"[{section}]", entry])
+        return
+    end = next((j for j in range(start + 1, len(lines)) if _ANY_HEADER_RE.match(lines[j])), len(lines))
+    key_re = re.compile(rf"^(\s*){re.escape(key)}\s*=(.*)$")
+    for j in range(start + 1, end):
+        m = key_re.match(lines[j])
+        if m:
+            cut = _value_end(m.group(2))
+            lines[j] = m.group(1) + entry + (m.group(2)[cut:] if cut >= 0 else "")
+            return
+    insert = start + 1   # 섹션의 마지막 설정 줄 뒤 (뒤따르는 빈 줄·주석 앞)
+    for j in range(start + 1, end):
+        if lines[j].strip() and not lines[j].lstrip().startswith("#"):
+            insert = j + 1
+    lines.insert(insert, entry)
+
+
+def save_settings(path: Path, values: Dict[Tuple[str, str], str]) -> None:
+    """설정 파일에서 values({(섹션, 키): 문자열})만 바꾼다. 다른 설정·주석·줄바꿈 방식은 그대로 둔다.
+
+    파일이 없으면 새로 만든다. 장치 토큰이 들어 있으므로 권한은 600. 고친 내용을 다시 읽어 값이 맞는지
+    확인한 뒤에 바꾼다(틀리면 ConfigError, 파일은 그대로).
+    """
+    try:
+        text = path.read_bytes().decode("utf-8") if path.exists() else ""
+    except (OSError, UnicodeDecodeError) as e:
+        raise ConfigError(f"설정 파일을 읽을 수 없습니다 ({path}): {e}") from e
+    newline = "\r\n" if "\r\n" in text else "\n"
+    lines = [line[:-1] if line.endswith("\r") else line for line in text.split("\n")]
+    if lines and lines[-1] == "":
+        lines.pop()
+    for (section, key), value in values.items():
+        _set_line(lines, section, key, value)
+    new_text = newline.join(lines) + newline
+    try:
+        data = tomllib.loads(new_text)
+    except tomllib.TOMLDecodeError as e:
+        raise ConfigError(f"설정 파일을 고칠 수 없습니다 ({path}): {e}") from e
+    for (section, key), value in values.items():
+        if not isinstance(data.get(section), dict) or data[section].get(key) != value:
+            raise ConfigError(f"설정 파일의 [{section}] {key}를 바꾸지 못했습니다 ({path})")
+    tmp = path.with_name(path.name + ".tmp")
+    try:
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as f:
+            f.write(new_text)
+        os.chmod(tmp, 0o600)   # 이미 있던 임시 파일이어도 본인만 읽게
+        os.replace(tmp, path)
+    except OSError as e:
+        raise ConfigError(f"설정 파일을 쓸 수 없습니다 ({path}): {e}") from e

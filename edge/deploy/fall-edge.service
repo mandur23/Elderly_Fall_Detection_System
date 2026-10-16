@@ -9,12 +9,19 @@ StartLimitIntervalSec=0
 Type=simple
 WorkingDirectory=__INSTALL_DIR__
 Environment=PYTHONUNBUFFERED=1
+# 시작할 때마다 서버의 edge 버전을 보고 다르면 새 코드를 받는다(edge/VERSION이 있을 때만. 지우면 끔).
+# 앞의 '-': 서버가 꺼져 있거나 업데이트가 실패해도 시작은 그대로 한다. 요청마다 10초, pip는 180초 제한.
+ExecStartPre=-__INSTALL_DIR__/.venv/bin/python -m edge.update
 ExecStart=__INSTALL_DIR__/.venv/bin/python -m edge
+# 업데이트로 requirements가 바뀌면 pip 설치까지 기다린다(기본 90초로는 모자랄 수 있음).
+TimeoutStartSec=300
 # 서버 연결이 끊기면 프로그램이 스스로 다시 접속한다. 프로그램이 끝나면(카메라 드라이버 정지 등) 다시 띄운다.
 Restart=always
 RestartSec=3
 # 설정 오류(종료 코드 2)는 다시 띄워도 같으므로 멈춘다. config.toml을 고친 뒤 systemctl --user restart fall-edge
 RestartPreventExitStatus=2
+# 서버의 edge 버전이 달라 업데이트하려고 끝낸 것(종료 코드 3)은 정상 종료로 본다. 다시 띄우면서 ExecStartPre가 받는다.
+SuccessExitStatus=3
 TimeoutStopSec=10
 NoNewPrivileges=true
 

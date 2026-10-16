@@ -36,6 +36,9 @@
   이전 연결에서 늦게 도착한 장면·소리는 버립니다.
 - WebSocket 압축(permessage-deflate)은 쓰지 않습니다. JPEG·PCM은 거의 줄지 않고 라즈베리파이 CPU와 지연만 늘기 때문입니다.
 - 바이너리 메시지의 시각이 유한한 수가 아니면(NaN·무한대) 규약 위반(4400)입니다.
+- `welcome`에는 서버가 내려주는 라즈베리파이 코드 묶음의 버전 `edge_version`이 들어갈 수 있습니다(선택 항목).
+  서버에서 설치한 edge는 자기 버전과 다르면 다시 시작하며 서버에서 새 코드를 받습니다(`GET /edge/version`,
+  `GET /edge/bundle.tar.gz`, 장치 토큰 필요).
 
 ### 현장 화면 키
 - 현장 화면에는 로그인이 없으므로, 서버는 현장 화면 API(`/api/state`, `/api/clear`, `/api/events`)에 장치별 키를 요구합니다

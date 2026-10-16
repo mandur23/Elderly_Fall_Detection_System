@@ -219,7 +219,9 @@ Wi-Fi가 '공용 네트워크'로 잡혀 있으면 위 규칙이 적용되지 �
 누운 자세가 0.3초 미만으로 잠깐 끊긴 것(자세 추정 흔들림)은 누움 시간을 이어서 잽니다.
 시간은 edge가 붙인 촬영 시각을 쓰고, 처리가 밀리면 최신 장면만 처리합니다. 잠깐 끊겼다 다시 접속하면 판정을 이어 가고,
 라즈베리파이가 재부팅해 시각이 거꾸로 가거나 10초 넘게 끊겼으면 새로 시작합니다. 낙상 의심 뒤에는 이벤트가 끝날 때까지
-그 장치의 자세 추정을 쉬어 음성 인식에 CPU를 넘깁니다.
+그 장치의 자세 추정을 쉬어 음성 인식에 CPU를 넘깁니다. 사람이 2초 넘게 안 보이는 빈 방은 0.2초마다(초당 5장)만
+사람을 찾고, 보이면 바로 매 장면을 봅니다. 사람이 없는 장면은 자세 추정이 오히려 느리기 때문입니다(약 24ms 대 17ms).
+빈 방 장치 한 대의 서버 CPU 사용이 코어 하나의 약 19%에서 8%로 줄었습니다.
 
 ### 음성 확인
 낙상 의심 → 안내 음성 전송(`play_begin`/`AUDIO_OUT`/`play_end`) → `playback_done`을 받은 뒤 마이크 켜기 →
@@ -279,6 +281,10 @@ edge 연결 끊김, `status` 끊김(6초), 카메라·마이크·스피커 문�
 | `POST /api/admin/clear?device=<id>` | 관리자 해제. `X-Admin-Action: 1` 헤더 필요 (관리자만) |
 | `GET /api/admin/guardians`, `POST /api/admin/guardians`, `POST·DELETE /api/admin/guardians/<id>` | 보호자 계정 목록·만들기·수정·삭제 (관리자만, 바꿀 때 `X-Admin-Action: 1`) |
 | `DELETE /api/admin/devices/<id>` | 연결이 끊긴 장치를 목록에서 지우기 (관리자만, `X-Admin-Action: 1`). 연결 중이거나 경보·확인 중이면 409 |
+| `GET /api/admin/edge-setup` | 라즈베리파이 설치 명령(서버 주소·장치 토큰 포함) (관리자만) |
+| `GET /edge/setup.sh` | 라즈베리파이 설치 스크립트 (`edge/deploy/setup.sh`, 서버 주소를 채워서) |
+| `GET /edge/version` | 라즈베리파이 코드 묶음 버전 (edge/ + shared/ 내용의 해시) |
+| `GET /edge/bundle.tar.gz` | 라즈베리파이 코드 묶음 (`Authorization: Bearer <토큰>` 필요). 시험·캐시·설정 파일은 넣지 않음 |
 | `GET /g`, `/g/login`, `POST /g/logout` | 보호자 웹과 로그인 |
 | `GET /api/g/overview` | 보호자 웹 데이터: 맡은 장치 상태·이벤트·문제, 최근 기록 (보호자 로그인) |
 | `POST /api/g/clear?device=<id>` | 보호자 해제. `X-Guardian-Action: 1` 헤더, 맡은 장치·해제 권한이 있을 때만 |

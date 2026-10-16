@@ -4,7 +4,8 @@
 - 같은 PC의 터널·프록시를 거친 요청은 '서버 PC 자신'(관리자)으로 보지 않는다
 - 서버를 다시 켜도 장치를 기억해 연결 끊김을 알리고, 관리자는 치운 장치를 지울 수 있다
 - 관리자 로그인은 세션마다 다른 값이고, 로그아웃하면 그 값은 다시 쓸 수 없다
-- 영상 처리: 낙상 의심을 넘기다 오류가 나도 다시 시도, 분석 멈춤 표시, 잠깐 끊긴 재접속은 판정을 이어 감
+- 영상 처리: 낙상 의심을 넘기다 오류가 나도 다시 시도, 분석 멈춤 표시, 잠깐 끊긴 재접속은 판정을 이어 감,
+  빈 방은 초당 5장만 자세 추정
 """
 
 import asyncio
@@ -19,9 +20,9 @@ from server.app import ADMIN_COOKIE, ADMIN_HEADER, CLEAR_HEADER, FallServer
 from server.events import collect_audio
 from server.fall import FallParams, FallState
 from server.tests.fakes import (TOKEN, FakeNotifier, FakePoseFactory, FakeRecognizer, fall_script, make_settings,
-                                prompt_sound, tiny_jpeg)
+                                prompt_sound, standing, tiny_jpeg)
 from server.tests.test_e2e import ServerTestBase
-from server.vision import VideoPipeline
+from server.vision import FrameAnalyzer, VideoPipeline
 from shared import protocol as P
 
 REMOTE = {"X-Forwarded-For": "203.0.113.9"}  # 같은 PC의 터널을 거쳐 온 바깥 요청
@@ -230,6 +231,34 @@ class VideoPipelineRobustnessTest(unittest.IsolatedAsyncioTestCase):
         await self.feed(pipeline, 5.0, 0.5)
         self.assertEqual(pipeline._analyzer.estimator.resets, 1)
         await pipeline.close()
+
+
+class IdleSkipTest(unittest.TestCase):
+    def test_empty_room_is_checked_five_times_a_second(self):
+        factory = FakePoseFactory(lambda t: None)  # 아무도 없음
+        analyzer = FrameAnalyzer(factory.create(), FallParams(), 0.3)
+        jpeg = tiny_jpeg()
+        for i in range(40):  # 10fps로 4초
+            analyzer.process(jpeg, i / 10)
+        # 처음 2초는 매 장면(20장), 그 뒤 2초는 0.2초마다(10장)
+        self.assertEqual(len(factory.seen), 20 + 10)
+
+        factory.script = lambda t: standing()
+        seen = len(factory.seen)
+        for i in range(40, 46):
+            result = analyzer.process(jpeg, i / 10)
+        self.assertGreaterEqual(len(factory.seen) - seen, 5)  # 사람이 보이면 곧바로 매 장면
+        self.assertTrue(result.person)
+        self.assertEqual(result.state, FallState.NORMAL)
+
+    def test_no_skip_while_falling(self):
+        factory = FakePoseFactory(lambda t: None)
+        analyzer = FrameAnalyzer(factory.create(), FallParams(), 0.3)
+        analyzer.empty_since = 0.0
+        analyzer.fsm.state = FallState.FALLING  # 넘어지는 중에는 사람이 안 보여도 매 장면 본다
+        for i in range(30, 40):
+            analyzer.process(tiny_jpeg(), i / 10)
+        self.assertEqual(len(factory.seen), 10)
 
 
 class CollectAudioTest(unittest.IsolatedAsyncioTestCase):

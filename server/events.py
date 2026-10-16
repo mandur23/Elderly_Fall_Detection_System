@@ -389,9 +389,6 @@ class EventService:
             self._spawn(link.stop_playback())  # 경보음 중단
         return True
 
-    async def clear_by_button(self, device_id: Optional[str] = None) -> bool:
-        return await self.clear(device_id, CLEARED_BY_BUTTON)
-
     # --- 보호자 알림 ---
     async def _send_alert(self, event_id: int, delayed: bool = False) -> None:
         event = self.store.get_event(event_id)

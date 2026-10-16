@@ -74,7 +74,7 @@ class RestartTest(EventServiceTestBase):
         self.assertIn(self.store.get_event(alarm)["started_at"][:19].replace("T", " "), self.notifier.sent[0])
         self.assertEqual(self.store.get_event(alarm)["notify_state"], st.NOTIFY_SENT)
 
-        self.assertTrue(await service.clear_by_button())
+        self.assertTrue(await service.clear())
         await asyncio.sleep(0.05)
         self.assertEqual(service.state, NORMAL)
         self.assertEqual(self.store.get_event(alarm)["cleared_by"], "BUTTON")
@@ -178,7 +178,7 @@ class NotifyRetryTest(EventServiceTestBase):
         event_id = self.alarm_event()
         service.cases["pi-1"] = Case("pi-1", event_id, ALARM)
         await service._send_alert(event_id)
-        await service.clear_by_button()
+        await service.clear()
         self.assertEqual(self.store.get_event(event_id)["notify_state"], st.NOTIFY_CANCELLED)
         self.store.set_notify_state(event_id, st.NOTIFY_CANCELLED, next_at=None)
         await service.retry_due()

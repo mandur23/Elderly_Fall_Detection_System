@@ -7,7 +7,9 @@
 // 안내 음성 재생과 녹음은 Pi 프로그램(pi_client)이 스피커·마이크로 한다. 이 화면은 보여 주기와 버튼만 맡는다.
 //
 // 기기 키는 비밀번호와 같다. 주소창에 남으면 화면을 본 사람이 옮겨 적을 수 있으므로
-// 읽자마자 주소에서 지우고 메모리에만 둔다(localStorage 등에 저장하지 않는다).
+// 읽자마자 주소에서 지운다. 대신 이 탭의 sessionStorage에만 둔다: 화면이 새로 고쳐져도
+// (Chromium 오류 뒤 자동 새로 고침, F5 등) 키 없이 '설정 필요'에 멈추지 않게 하려는 것이다.
+// sessionStorage는 탭을 닫으면 지워지고 다른 탭과 나누지 않는다. localStorage에는 저장하지 않는다.
 
 import { api, ApiError } from './api.js';
 import { $, show, hide, formatTime } from './ui.js';
@@ -32,7 +34,26 @@ const els = {
 
 const params = new URLSearchParams(location.search);
 const deviceId = Number(params.get('device_id'));
-const deviceKey = params.get('key') || '';
+const KEY_STORAGE = `fall.kiosk.key.${deviceId}`;   // 기기마다 따로
+
+function loadKey() {
+  const fromUrl = params.get('key') || '';
+  try {
+    if (fromUrl) {
+      sessionStorage.setItem(KEY_STORAGE, fromUrl);
+      return fromUrl;
+    }
+    return sessionStorage.getItem(KEY_STORAGE) || '';
+  } catch {
+    return fromUrl;   // 저장소를 못 쓰면 이번 화면에서만 쓴다
+  }
+}
+
+function forgetKey() {
+  try { sessionStorage.removeItem(KEY_STORAGE); } catch { /* 무시 */ }
+}
+
+const deviceKey = loadKey();
 
 if (params.has('key')) {
   // 키만 지우고 device_id는 남긴다(어느 기기 화면인지 알 수 있게)
@@ -135,7 +156,9 @@ function handlePollError(err) {
   const status = err instanceof ApiError ? err.status : 0;
   if (status === 401 || status === 403 || status === 404) {
     // 키가 틀렸거나 마이페이지에서 기기를 지웠다. 다시 물어도 같으므로 멈춘다.
+    // 쓸모없어진 키는 이 탭에서도 지운다.
     stopped = true;
+    forgetKey();
     activeEvent = null;
     render('error', '기기 확인 실패',
       '기기 번호나 기기 키가 맞지 않거나 기기가 삭제되었습니다. 마이페이지에서 기기를 확인하고 Pi 설정을 고친 뒤 화면을 다시 실행해 주세요.',

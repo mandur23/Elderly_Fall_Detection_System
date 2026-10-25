@@ -70,6 +70,7 @@ let serverState = null;      // 서버가 알려 준 감지 상태 (NORMAL / SUS
 let activeEventId = null;    // 진행 중인 이벤트 번호 ('괜찮아요' 버튼에 필요)
 let voiceAbort = null;       // 진행 중인 음성 확인을 멈추는 AbortController
 const handledChecks = new Set();  // 이미 처리한 (event_id:attempt). 다시 연결하면 서버가 같은 요청을 또 보낸다.
+const failedUploads = new Map();  // 보내지 못한 녹음 (event_id:attempt → 녹음). 서버가 같은 요청을 다시 보내면 이것을 다시 올린다.
 const sentAt = [];           // 최근 보낸 프레임 시각 (보내는 속도 표시용)
 
 let promptAudio = null;      // 안내 음성 <audio>
@@ -301,9 +302,13 @@ function updateStatusText() {
 
 // --- 서버 연결 ----------------------------------------------------------------------
 
+// closeText()용 내부 구분값: 서버가 4401 'device deleted'(감지 중 기기 삭제)로 닫았을 때
+const DEVICE_DELETED = 'device-deleted';
+
 function closeText(code) {
   if (code === 4409) return '다른 화면에서 같은 기기로 감지 중입니다. 이 화면의 감지는 멈췄습니다.';
   if (code === 4401) return '로그인이 풀렸거나 이 기기가 지워졌습니다. 다시 로그인한 뒤 감지를 시작해 주세요.';
+  if (code === DEVICE_DELETED) return '마이페이지에서 이 휴대폰 기기가 삭제되어 감지를 멈췄습니다. 다시 쓰려면 ‘감지 시작’을 누르세요(새 기기로 등록됩니다).';
   if (code === 4403) return '이 기기를 쓸 권한이 없습니다. 이 휴대폰에 로그인한 계정을 확인해 주세요.';
   if (code === 4400) return '잘못된 연결 요청입니다. 화면을 새로 고친 뒤 다시 시도해 주세요.';
   return `서버 연결이 끊겼습니다. (코드 ${code})`;
@@ -332,8 +337,16 @@ async function handleClose(code, info) {
     stopDetection({ message: closeText(code) });
     return;
   }
-  // 기억해 둔 기기가 지워졌거나(4401 unknown device) 다른 계정의 기기면(4403) 새로 등록해 한 번만 다시 붙는다.
-  // 로그인이 풀린 경우라면 ensureDevice()의 API 호출이 401이 되어 로그인 화면으로 간다.
+  // 감지하는 도중에 마이페이지에서 이 기기를 지웠다('device deleted'. 끊겨 있는 동안 지웠으면 다시 붙을 때
+  // 'unknown device'). 삭제 확인 창이 '감지가 멈춥니다'라고 했으므로 새 기기를 만들어 계속 보내지 않고 멈춘다.
+  // 오래된 기기 번호는 '감지 시작' 때 ensureDevice()가 기기 목록과 맞춰 보고 새로 등록한다.
+  if (code === 4401 && info && (info.reason === 'device deleted' || info.reason === 'unknown device')) {
+    forgetDeviceId();
+    stopDetection({ message: closeText(DEVICE_DELETED) });
+    return;
+  }
+  // 기억해 둔 기기가 다른 계정의 기기면(4403) 새로 등록해 한 번만 다시 붙는다.
+  // 로그인이 풀린 경우(4401 login required / session expired)라면 ensureDevice()의 API 호출이 401이 되어 로그인 화면으로 간다.
   if ((code === 4401 || code === 4403) && !recreatedDevice) {
     recreatedDevice = true;
     sock = null;
@@ -390,11 +403,17 @@ function setServerState(rawState, eventId) {
   }
 }
 
-async function lookupActiveEvent() {
+/**
+ * 서버에 진행 중인 이벤트 번호를 묻는다.
+ * rethrow가 true면 묻지 못했을 때 오류를 던진다. '괜찮아요' 버튼은 '이벤트 없음'과 '묻지 못함'을
+ * 구분해야 한다(묻지 못했는데 전했다고 하면, 경보가 그대로인데 어르신은 전해진 줄 안다).
+ */
+async function lookupActiveEvent({ rethrow = false } = {}) {
   try {
     const result = await api(`/api/devices/${deviceId}/state`, { noRedirect: true });
     if (result.active_event) activeEventId = result.active_event.id;
   } catch (err) {
+    if (rethrow) throw err;
     console.info('진행 중인 이벤트를 확인하지 못함', errorText(err));
   }
   return activeEventId;
@@ -455,7 +474,9 @@ async function playPromptFile(signal) {
       promptAudio.removeEventListener('error', done);
       resolve();
     };
-    const timer = setTimeout(done, PROMPT_MAX_MS * 1.5);
+    // 시간이 넘으면 재생을 멈추고 넘어간다. 안 멈추면 녹음에 안내 음성('…괜찮아요라고…')이 섞여
+    // 서버가 '괜찮다'고 알아들을 수 있다.
+    const timer = setTimeout(() => { promptAudio.pause(); done(); }, PROMPT_MAX_MS * 1.5);
     promptAudio.addEventListener('ended', done);
     promptAudio.addEventListener('error', done);
     signal.addEventListener('abort', () => { promptAudio.pause(); done(); }, { once: true });
@@ -483,10 +504,15 @@ function speakPrompt(signal) {
     utter.onstart = () => { started = true; };
     utter.onend = finish;
     utter.onerror = finish;
-    const maxTimer = setTimeout(finish, PROMPT_MAX_MS);
-    // 1.5초가 지나도 말하기 시작하지 않았으면(목소리가 없는 기기 등) 기다리지 않는다
+    // 시간 초과로 넘어갈 때는 반드시 말하기를 멈춘다. 안드로이드의 음성 엔진은 늦게 시작하거나 길어질 수 있는데,
+    // 계속 말하는 중에 녹음하면 안내 문장('…괜찮아요라고…')이 녹음되어 서버가 '괜찮다'로 알아들을 수 있다.
+    // (시스템 음성은 브라우저의 반향 제거 대상이 아니라 마이크에 그대로 들어간다)
+    const giveUp = () => { speechSynthesis.cancel(); finish(); };
+    const maxTimer = setTimeout(giveUp, PROMPT_MAX_MS);
+    // 1.5초가 지나도 말하기 시작하지 않았으면(목소리가 없는 기기 등) 기다리지 않는다.
+    // 나중에 늦게 말하기 시작하지 않도록 대기 중인 말도 지운다.
     const startCheck = setTimeout(() => {
-      if (!started && !speechSynthesis.speaking) finish();
+      if (!started && !speechSynthesis.speaking) giveUp();
     }, 1500);
     signal.addEventListener('abort', () => { speechSynthesis.cancel(); finish(); }, { once: true });
     speechSynthesis.cancel();   // 앞에 남은 말이 있으면 지운다
@@ -567,8 +593,12 @@ async function handleVoiceCheck(msg) {
   const attempt = Number(msg.attempt);
   if (!Number.isInteger(eventId) || !Number.isInteger(attempt)) return;
   const key = `${eventId}:${attempt}`;
-  if (handledChecks.has(key)) return;   // 다시 연결할 때 서버가 같은 요청을 또 보낸다
+  // 다시 연결할 때 서버가 같은 요청을 또 보낸다. 이미 처리했으면 무시하되,
+  // 업로드가 끊겨 실패했던 회차라면 서버가 아직 기다린다는 뜻이므로 녹음해 둔 대답을 다시 올린다.
+  const retryPayload = failedUploads.get(key) || null;
+  if (handledChecks.has(key) && !retryPayload) return;
   handledChecks.add(key);
+  failedUploads.delete(key);
 
   // 앞 회차가 아직 진행 중이면 새 회차가 우선이다(서버는 이미 앞 회차를 기다리지 않는다)
   abortVoice();
@@ -584,25 +614,33 @@ async function handleVoiceCheck(msg) {
   showOverlay('SUSPECT');
 
   try {
-    setStep(attempt > 1 ? '다시 여쭙니다…' : '안내를 들려 드리는 중…');
-    await playPrompt(signal);
-    if (signal.aborted) return;
-
-    let payload;
-    try {
-      const recorded = await recordReply(signal, (left) => setStep(`지금 말씀해 주세요 (${left}초)`));
-      if (!recorded) return;   // 녹음 중에 취소됨(버튼으로 해제 등)
-      payload = recorded;
-    } catch (err) {
+    let payload = retryPayload;
+    if (!payload) {
+      setStep(attempt > 1 ? '다시 여쭙니다…' : '안내를 들려 드리는 중…');
+      await playPrompt(signal);
       if (signal.aborted) return;
-      console.info('녹음 실패', err);
-      // 녹음을 못 하면 '확인 불가'로 서버에 알린다(서버가 보호자에게 경보를 보낸다)
-      payload = { error: micProblem || `record failed (${err.name || err.message || 'error'})` };
+
+      try {
+        const recorded = await recordReply(signal, (left) => setStep(`지금 말씀해 주세요 (${left}초)`));
+        if (!recorded) return;   // 녹음 중에 취소됨(버튼으로 해제 등)
+        payload = recorded;
+      } catch (err) {
+        if (signal.aborted) return;
+        console.info('녹음 실패', err);
+        // 녹음을 못 하면 '확인 불가'로 서버에 알린다(서버가 보호자에게 경보를 보낸다)
+        payload = { error: micProblem || `record failed (${err.name || err.message || 'error'})` };
+      }
+      if (signal.aborted) return;
     }
-    if (signal.aborted) return;
 
     setStep('대답을 보내는 중…');
-    await uploadVoice(eventId, attempt, payload);
+    try {
+      await uploadVoice(eventId, attempt, payload);
+    } catch (err) {
+      // 서버에 닿지 못했거나(0) 서버 쪽 문제(5xx)면 다시 보낼 수 있게 녹음을 남겨 둔다
+      if (err instanceof ApiError && (err.status === 0 || err.status >= 500)) failedUploads.set(key, payload);
+      throw err;
+    }
     if (!signal.aborted) setStep('대답을 확인하고 있습니다…');
   } catch (err) {
     if (signal.aborted) return;
@@ -620,10 +658,15 @@ async function handleVoiceCheck(msg) {
 async function onOk() {
   els.okBtn.disabled = true;
   try {
-    const eventId = activeEventId || await lookupActiveEvent();
-    if (eventId) {
-      await api(`/api/events/${eventId}/clear`, { method: 'POST', noRedirect: true });
+    // 이벤트 번호를 묻지 못하면 오류로 넘어간다(아래 catch). 전하지 못했는데 '전했습니다'라고 하면 안 된다.
+    const eventId = activeEventId || await lookupActiveEvent({ rethrow: true });
+    if (!eventId) {
+      // 서버에 물어보니 진행 중인 이벤트가 없다 = 이미 끝났다
+      abortVoice();
+      hideOverlay();
+      return;
     }
+    await api(`/api/events/${eventId}/clear`, { method: 'POST', noRedirect: true });
     abortVoice();
     hideOverlay();
     toast('괜찮다고 전했습니다.', 'success');
@@ -698,6 +741,7 @@ function stopDetection({ message } = {}) {
   hideOverlay();
   serverState = null;
   activeEventId = null;
+  failedUploads.clear();
   encoding = false;
   sentAt.length = 0;
   setConn('idle');

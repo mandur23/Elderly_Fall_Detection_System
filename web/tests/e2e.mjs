@@ -340,6 +340,21 @@ async function main() {
       await wardPage.waitForURL(BASE + '/mypage');
       await wardPage.waitForFunction((n) => document.querySelector('#my-name').textContent === n, WARD.name);
 
+      // 로그인 뒤 돌아갈 주소(next)로 다른 사이트에 보낼 수 없다(open redirect).
+      // 브라우저는 주소의 탭·줄바꿈을 지우고 '\'를 '/'로 읽으므로 '/<탭>/evil'도 '//evil'(다른 사이트)이 된다.
+      // 이미 로그인되어 있으면 로그인 화면이 바로 next로 넘기므로, 그 자리에서 확인한다.
+      const evil = (u) => u.hostname === 'evil.example';   // 주소 안의 next=...가 아니라 실제 이동한 곳만
+      await wardPage.route(evil, (route) => route.abort());
+      for (const bad of ['//evil.example/x', '/%09/evil.example/x', '/%0A/evil.example/x', '/%0D/evil.example/x',
+        '/.//evil.example/x', '/%5C/evil.example/x', 'https://evil.example/x']) {
+        await wardPage.goto(`${BASE}/login?next=${bad}`);
+        await wardPage.waitForURL((u) => u.pathname === '/' || !u.href.startsWith(BASE), { timeout: 5000 });
+        check(wardPage.url() === BASE + '/', `next=${bad} 로 다른 곳에 감: ${wardPage.url()}`);
+      }
+      await wardPage.unroute(evil);
+      await wardPage.goto(`${BASE}/login?next=${encodeURIComponent('/mypage?from=login#top')}`);
+      await wardPage.waitForURL(BASE + '/mypage?from=login#top');
+
       await signupUI(guardPage, GUARD);
     });
 
@@ -438,6 +453,11 @@ async function main() {
         await kiosk.waitForSelector('body.state-normal', { timeout: 8000 });
         check((await kiosk.textContent('#k-title')).includes('정상'), '정상 화면 문구가 다름');
         check(!(await kiosk.isVisible('#k-ok')), '정상인데 괜찮아요 버튼이 보임');
+        // 화면이 새로 고쳐져도(주소에는 이미 키가 없다) '설정 필요'에 멈추지 않고 계속 동작한다
+        await kiosk.reload();
+        await kiosk.waitForSelector('body.state-normal', { timeout: 8000 });
+        check(!kiosk.url().includes('key='), `새로 고친 뒤 주소창에 기기 키가 있음: ${kiosk.url()}`);
+        check(!(await kiosk.evaluate(() => JSON.stringify(localStorage))).includes(state.piKey), '기기 키가 localStorage에 저장됨');
 
         const before = pi.messages.filter((m) => m.type === 'voice_check').length;
         await pi.fall();
@@ -540,6 +560,77 @@ async function main() {
       await waitText(wardPage, '#conn-badge', /연결 안 됨/);
     });
 
+    await scenario('카메라 화면(가짜 연결): 못 전한 괜찮아요는 실패로 안내 · 끊긴 업로드는 다시 보냄', async () => {
+      // 서버 대신 이 테스트가 /ws/camera 를 맡아 원하는 메시지를 보낸다(프레임은 버린다).
+      const page = watchPage(await ctxWard.newPage(), 'camera-mock');
+      let fakeServer = null;
+      await page.routeWebSocket(/\/ws\/camera/, (ws) => {
+        fakeServer = ws;
+        ws.onMessage(() => {});
+      });
+      let stateMode = 'abort';           // 'abort' = 서버에 닿지 못함, 'event' = 진행 중 이벤트 알려 줌
+      await page.route(/\/api\/devices\/\d+\/state$/, (route) => (stateMode === 'abort'
+        ? route.abort()
+        : route.fulfill({ json: { device: {}, active_event: { id: 90001, state: 'ALARM' } } })));
+      const clears = [];
+      await page.route(/\/api\/events\/\d+\/clear$/, (route) => {
+        clears.push(route.request().url());
+        return route.fulfill({ json: { ok: true } });
+      });
+      let voiceCalls = 0;
+      await page.route(/\/api\/events\/\d+\/voice$/, (route) => {
+        voiceCalls += 1;
+        return voiceCalls === 1 ? route.abort() : route.fulfill({ json: { accepted: true } });
+      });
+      try {
+        await page.goto(BASE + '/camera');
+        await page.click('#start-btn');
+        await waitText(page, '#conn-badge', /^연결됨$/, 10000);
+        const send = (m) => need(fakeServer, '가짜 서버 연결').send(JSON.stringify(m));
+
+        // 1) 다시 연결한 뒤의 첫 state에는 이벤트 번호가 없다. 번호를 묻지도 못하면 '전했다'고 하면 안 된다.
+        send({ type: 'state', state: 'ALARM' });
+        await page.waitForSelector('#alert-overlay:not(.hidden)');
+        await page.click('#ok-btn');
+        await page.waitForSelector('.toast-error', { timeout: 5000 });
+        check(await page.isVisible('#alert-overlay'), '전하지 못했는데 경보 화면이 닫힘');
+        check(!(await page.isVisible('.toast-success')), '전하지 못했는데 "괜찮다고 전했습니다"가 뜸');
+        check(clears.length === 0, `해제 요청이 갔음: ${clears}`);
+        check(await page.isEnabled('#ok-btn'), '실패 뒤 괜찮아요 버튼을 다시 누를 수 없음');
+        // 서버에 다시 닿으면 같은 버튼으로 전해진다
+        stateMode = 'event';
+        await page.click('#ok-btn');
+        await page.waitForSelector('#alert-overlay', { state: 'hidden', timeout: 5000 });
+        check(clears.length === 1 && clears[0].endsWith('/api/events/90001/clear'), `해제 요청이 다름: ${clears}`);
+        send({ type: 'state', state: 'NORMAL' });
+
+        // 2) 녹음을 올리다 끊기면, 서버가 같은 voice_check를 다시 보낼 때 녹음해 둔 대답을 다시 올린다
+        const vc = { type: 'voice_check', event_id: 90002, attempt: 1 };
+        send(vc);
+        await page.waitForSelector('#alert-overlay:not(.hidden)');
+        for (let i = 0; i < 150 && voiceCalls < 1; i++) await sleep(100);
+        check(voiceCalls === 1, '녹음 업로드를 시도하지 않음');
+        await waitText(page, '.toast-error', /대답을 보내지 못했습니다/, 5000);
+        const t0 = Date.now();
+        send(vc);   // 다시 연결했을 때 서버가 보내는 것과 같은 요청
+        for (let i = 0; i < 50 && voiceCalls < 2; i++) await sleep(100);
+        check(voiceCalls === 2, '같은 요청을 다시 받았는데 다시 올리지 않음');
+        // 다시 녹음(5초)하지 않고 남겨 둔 녹음을 바로 올렸는가
+        check(Date.now() - t0 < 3000, `다시 올리는 데 너무 오래 걸림(다시 녹음함?): ${Date.now() - t0}ms`);
+        await waitText(page, '#alert-step', /대답을 확인하고 있습니다/, 5000);
+        send(vc);   // 이번에는 올렸으므로 또 받아도 무시한다
+        await sleep(600);
+        check(voiceCalls === 2, `이미 올린 회차를 또 올림 (${voiceCalls}번)`);
+
+        send({ type: 'state', state: 'NORMAL' });
+        await page.waitForSelector('#alert-overlay', { state: 'hidden' });
+        await page.click('#stop-btn');
+        await waitText(page, '#conn-badge', /연결 안 됨/);
+      } finally {
+        await page.close();
+      }
+    });
+
     await scenario('권한: 관계없는 사용자는 기기·이벤트를 볼 수 없음', async () => {
       const id = need(state.piId, 'Pi 기기');
       const page = watchPage(await ctxOther.newPage(), 'other');
@@ -561,6 +652,31 @@ async function main() {
       const { body: wardEvents } = await getJson(ctxWard, '/api/events?limit=1');
       const r = await ctxOther.request.post(`${BASE}/api/events/${wardEvents.events[0].id}/clear`);
       check(r.status() === 403 || r.status() === 404, `남의 이벤트를 해제할 수 있음 (${r.status()})`);
+    });
+
+    await scenario('카메라 화면: 감지 중 마이페이지에서 기기를 지우면 멈추고 새 기기를 만들지 않음', async () => {
+      const phoneId = need(state.phoneId, '휴대폰 기기');
+      const page = watchPage(await ctxWard.newPage(), 'camera-delete');
+      try {
+        await page.goto(BASE + '/camera');
+        await page.click('#start-btn');
+        await waitText(page, '#conn-badge', /^연결됨$/, 10000);
+        const before = (await getJson(ctxWard, '/api/devices')).body.devices.filter((d) => d.kind === 'phone');
+        check(before.length === 1 && before[0].id === phoneId, `휴대폰 기기 목록이 다름: ${JSON.stringify(before)}`);
+
+        await wardPage.goto(BASE + '/mypage');
+        await wardPage.click(`#devices li[data-device-id="${phoneId}"] >> text=삭제`);  // 확인 창 → 확인
+        await wardPage.waitForSelector(`#devices li[data-device-id="${phoneId}"]`, { state: 'detached', timeout: 8000 });
+
+        await waitText(page, '#conn-badge', /연결 안 됨/, 8000);
+        await waitText(page, '#camera-error', /삭제/, 5000);
+        check(await page.isVisible('#start-btn'), '감지가 멈추지 않음(감지 시작 버튼이 없음)');
+        await sleep(800);
+        const after = (await getJson(ctxWard, '/api/devices')).body.devices.filter((d) => d.kind === 'phone');
+        check(after.length === 0, `지운 뒤 새 휴대폰 기기가 저절로 생김: ${JSON.stringify(after)}`);
+      } finally {
+        await page.close();
+      }
     });
 
     await scenario('페이지 JS 오류 없음', async () => {

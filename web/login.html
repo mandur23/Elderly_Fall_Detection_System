@@ -36,11 +36,23 @@
     import { renderNav, $, show, hide, errorText } from '/static/js/ui.js';
 
     // 로그인 뒤 돌아갈 주소. 다른 사이트로 보내는 데 쓰이지 않게(open redirect) 이 사이트 안의 경로만 받는다.
+    // 글자만 보고 거르면 안 된다: 브라우저는 주소를 해석할 때 탭·줄바꿈을 지우고 '\'를 '/'로 읽으므로
+    // '/\t/evil.example'이 '//evil.example'(다른 사이트)이 된다. 그래서 브라우저와 같은 방식으로 해석한 뒤
+    // 이 사이트(origin)가 맞는지 보고, 해석된 경로만 쓴다.
     function safeNext() {
-      const next = new URLSearchParams(location.search).get('next') || '';
-      if (!next.startsWith('/') || next.startsWith('//') || next.includes('\\')) return '/';
-      if (next.startsWith('/login') || next.startsWith('/signup')) return '/';
-      return next;
+      const raw = new URLSearchParams(location.search).get('next') || '';
+      if (!raw.startsWith('/')) return '/';
+      let url;
+      try {
+        url = new URL(raw, location.origin);
+      } catch {
+        return '/';
+      }
+      if (url.origin !== location.origin) return '/';
+      // '/.//evil' 처럼 해석 뒤 경로가 '//'로 시작하면 다시 다른 사이트 주소가 되므로 막는다
+      if (url.pathname.startsWith('//')) return '/';
+      if (url.pathname.startsWith('/login') || url.pathname.startsWith('/signup')) return '/';
+      return url.pathname + url.search + url.hash;
     }
     const next = safeNext();
 

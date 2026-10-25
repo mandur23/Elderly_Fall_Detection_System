@@ -3,7 +3,7 @@
 메모리 상태(기기 세션, 진행 중 이벤트)는 이벤트 루프 한 곳에서만 바꾸므로 여기 핸들러는 모두
 async def로 둔다(def로 두면 FastAPI가 스레드에서 실행한다).
 
-WebSocket 거부 코드: 4400 잘못된 요청, 4401 인증 실패, 4403 권한 없음·다른 출처, 4409 새 연결로 교체됨.
+WebSocket 거부 코드: 4400 잘못된 요청, 4401 인증 실패, 4403 권한 없음·다른 출처·주인 계정 정지, 4409 새 연결로 교체됨.
 브라우저는 HTTP 오류 코드를 볼 수 없으므로 일단 접속을 받은 뒤 이 코드로 닫는다.
 클라이언트는 4401/4403이면 재연결하지 말고 로그인·기기 키를 확인하게 안내한다.
 """
@@ -53,13 +53,19 @@ def _authenticate_camera(ws: WebSocket, device_id: int) -> Tuple[Optional[Dict[s
     device = _state(ws).accounts.get_device(device_id)
     if device is None:
         return None, CLOSE_UNAUTHORIZED, "unknown device"
+    owner_disabled = _state(ws).accounts.is_disabled(device["owner_id"])
     if device["kind"] == "pi":
         if device_from_request(ws, device_id) is None:
             return None, CLOSE_UNAUTHORIZED, "bad device key"
+        if owner_disabled:
+            return None, CLOSE_FORBIDDEN, "owner suspended"
         return device, 0, ""
     # 휴대폰: 쿠키로 인증하므로 다른 사이트에서 연 접속을 막는다.
     if not check_origin(ws):
         return None, CLOSE_FORBIDDEN, "origin"
+    # 정지할 때 로그인 세션을 지우므로, 세션보다 먼저 확인해야 '정지'라는 이유(4403)로 닫을 수 있다.
+    if owner_disabled:
+        return None, CLOSE_FORBIDDEN, "owner suspended"
     user = user_from_websocket(ws)
     if user is None:
         return None, CLOSE_UNAUTHORIZED, "login required"

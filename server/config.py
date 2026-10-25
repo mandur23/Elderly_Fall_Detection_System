@@ -36,6 +36,8 @@ class Settings:
     ssl_certfile: Optional[str] = field(default_factory=lambda: os.getenv("FALL_SSL_CERT"))
     ssl_keyfile: Optional[str] = field(default_factory=lambda: os.getenv("FALL_SSL_KEY"))
     web_dir: Path = field(default_factory=lambda: Path(_env("FALL_WEB_DIR", str(BASE_DIR / "web"))))
+    # 관리자 페이지(/admin). 서버 PC 자신에서만 열린다(server/admin.py). 0으로 두면 아예 끈다.
+    admin_enabled: bool = field(default_factory=lambda: _env_bool("FALL_ADMIN", True))
 
     # --- 계정 ---
     session_days: int = 14
@@ -86,6 +88,10 @@ class Settings:
     @property
     def db_path(self) -> Path:
         return self.data_dir / self.db_filename
+
+    @property
+    def https_enabled(self) -> bool:
+        return bool(self.ssl_certfile and self.ssl_keyfile)
 
     @property
     def push_enabled(self) -> bool:

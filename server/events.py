@@ -178,6 +178,15 @@ class EventService:
                     result.append(self.public(row))
         return result
 
+    def all_active_events(self) -> List[Dict[str, Any]]:
+        """진행 중인 이벤트 전체(관리자 페이지 현황)."""
+        result = []
+        for ev in sorted(self._active.values(), key=lambda e: e.id):
+            row = self.get_row(ev.id)
+            if row is not None:
+                result.append(self.public(row))
+        return result
+
     def recent_events_visible_to(self, user: Dict[str, Any], limit: int = 50) -> List[Dict[str, Any]]:
         visible = self.accounts.visible_owner_ids(user["id"])
         marks = ",".join("?" for _ in visible)
@@ -367,8 +376,8 @@ class EventService:
                            text: Optional[str]) -> None:
         ev.state = STATE_ALARM
         self.db.execute(
-            "UPDATE events SET result = ?, voice_result = ?, voice_text = ? WHERE id = ?",
-            (result, voice_result, text if self.settings.store_voice_text else None, ev.id),
+            "UPDATE events SET result = ?, voice_result = ?, voice_text = ?, alarm_at = ? WHERE id = ?",
+            (result, voice_result, text if self.settings.store_voice_text else None, now_iso(), ev.id),
         )
         log.warning("이벤트 %s 경보: %s", ev.id, result)
         await self._send_state(ev, STATE_ALARM)

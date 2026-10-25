@@ -1,6 +1,7 @@
 """중앙 서버 앱 조립.
 
-구성 요소를 만들어 app.state에 넣고, 계정·실시간 라우터와 웹페이지를 붙인다.
+구성 요소를 만들어 app.state에 넣고, 계정·실시간·관리자 라우터와 웹페이지를 붙인다.
+관리자 페이지(/admin)는 서버 PC 자신에서만 열린다(server/admin.py의 AdminGuard, require_local).
 시작할 때 지난 실행의 이벤트를 정리(recover)하고 기기 상태 점검을 시작하며, 끝날 때 멈춘다.
 
 테스트는 create_app(settings, pose_estimator=가짜, transcriber=가짜)로 무거운 모델 없이 만든다.
@@ -17,6 +18,8 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
+from server.admin import AdminGuard
+from server.admin import router as admin_router
 from server.auth import Accounts, optional_user
 from server.config import Settings
 from server.db import Database
@@ -30,7 +33,7 @@ from server.voice import Transcriber, create_transcriber
 
 log = logging.getLogger("server.main")
 
-# 주소 -> web_dir 안의 파일 이름, 로그인 필요 여부
+# 주소 -> web_dir 안의 파일 이름, 로그인 필요 여부. 관리자 페이지(/admin)는 server/admin.py가 따로 연결한다.
 PAGES = {
     "/": ("index", False),
     "/login": ("login", False),
@@ -138,8 +141,12 @@ def create_app(settings: Optional[Settings] = None, pose_estimator: Optional[Pos
     state.transcriber = transcriber
     state.devices = devices
     state.events = events
+    state.started_at = time.time()  # 관리자 페이지의 가동 시간 표시용
 
     app.include_router(accounts_router)
     app.include_router(realtime_router)
+    # 관리자 API는 /docs(같은 Wi-Fi에서도 열림)에 나오지 않게 한다. 있다는 것도 알리지 않기 위함이다.
+    app.include_router(admin_router, include_in_schema=False)
+    app.add_middleware(AdminGuard)
     _add_web_routes(app, Path(settings.web_dir))
     return app

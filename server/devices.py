@@ -190,8 +190,25 @@ class DeviceHub:
             return
         session.closed = True
         log.info("기기 %s 삭제: 연결을 끊음", device_id)
+        await self._close_socket(session, 4401, "device deleted")
+
+    async def close_device(self, device_id: int, code: int, reason: str) -> None:
+        """서버 쪽에서 기기 연결을 끊고 보통의 연결 끊김처럼 처리한다(주인 계정 정지).
+
+        remove_device와 달리 기기는 남아 있으므로 보호자 화면에 '연결 끊김'을 알리고,
+        음성 확인 중이었으면 확인 불가로 넘어간다(disconnect). 수신 루프가 끝나며 부르는
+        disconnect()는 이미 처리된 세션이라 아무것도 하지 않는다.
+        """
+        session = self.sessions.get(device_id)
+        if session is None:
+            return
+        session.closed = True
+        await self._close_socket(session, code, reason)
+        await self.disconnect(session)
+
+    async def _close_socket(self, session: DeviceSession, code: int, reason: str) -> None:
         try:
-            await asyncio.wait_for(session.ws.close(code=4401, reason="device deleted"), timeout=DEVICE_SEND_TIMEOUT)
+            await asyncio.wait_for(session.ws.close(code=code, reason=reason), timeout=DEVICE_SEND_TIMEOUT)
         except Exception:
             pass  # 이미 끊긴 연결
 

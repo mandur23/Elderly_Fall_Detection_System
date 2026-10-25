@@ -5,11 +5,14 @@
 """
 
 import json
+import logging
 import sqlite3
 import threading
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+log = logging.getLogger("server.db")
 
 # events.result
 CLEARED_VOICE = "CLEARED_VOICE"        # 음성으로 '괜찮다' 응답
@@ -24,6 +27,13 @@ ALERT_RESULTS = (ALERT_HELP, ALERT_NO_REPLY, ALERT_VOICE_FAIL)
 GUARDIAN_PENDING = "pending"
 GUARDIAN_ACCEPTED = "accepted"
 
+# events.review_label (관리자 페이지에서 시험 결과를 검토하며 붙인다. docs/TEST_PLAN.md 오경보 통계)
+LABEL_REAL_FALL = "real_fall"            # 실제 낙상
+LABEL_STAGED_FALL = "staged_fall"        # 시험용으로 연출한 낙상
+LABEL_DAILY_ACTIVITY = "daily_activity"  # 일상 동작(앉기, 눕기 등)
+LABEL_FALSE_ALARM = "false_alarm"        # 오경보
+REVIEW_LABELS = (LABEL_REAL_FALL, LABEL_STAGED_FALL, LABEL_DAILY_ACTIVITY, LABEL_FALSE_ALARM)
+
 # notifications.state
 NOTIFY_SENT = "sent"
 NOTIFY_FAILED = "failed"
@@ -34,7 +44,8 @@ CREATE TABLE IF NOT EXISTS users (
     email TEXT NOT NULL UNIQUE,
     password_hash TEXT NOT NULL,
     name TEXT NOT NULL,
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    disabled_at TEXT             -- 관리자가 정지한 시각. NULL이면 정상 계정
 );
 CREATE TABLE IF NOT EXISTS sessions (
     token_hash TEXT PRIMARY KEY,
@@ -76,7 +87,10 @@ CREATE TABLE IF NOT EXISTS events (
     voice_result TEXT,
     voice_text TEXT,
     feature_snapshot TEXT,
-    cleared_by TEXT              -- 'user:<id>' | 'device:<id>'
+    cleared_by TEXT,             -- 'user:<id>' | 'device:<id>'
+    alarm_at TEXT,               -- 경보로 바뀐 시각(경보 -> 해제 시간 통계용)
+    review_label TEXT,           -- 시험 검토 라벨(관리자 페이지): REVIEW_LABELS 중 하나
+    review_note TEXT             -- 시험 검토 메모
 );
 CREATE TABLE IF NOT EXISTS notifications (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -89,6 +103,13 @@ CREATE TABLE IF NOT EXISTS notifications (
     created_at TEXT NOT NULL
 );
 """
+
+# 예전 스키마로 만든 DB에 나중에 추가한 열. CREATE TABLE IF NOT EXISTS는 이미 있는 표를 바꾸지 않으므로
+# 서버를 켤 때 없는 열만 ALTER TABLE로 더한다. 새 열을 만들 때는 SCHEMA와 여기에 함께 적는다.
+ADDED_COLUMNS = {
+    "users": [("disabled_at", "TEXT")],
+    "events": [("alarm_at", "TEXT"), ("review_label", "TEXT"), ("review_note", "TEXT")],
+}
 
 
 def now_iso() -> str:
@@ -107,6 +128,15 @@ class Database:
         with self._lock, self._conn:
             self._conn.execute("PRAGMA foreign_keys = ON")
             self._conn.executescript(SCHEMA)
+            self._add_missing_columns()
+
+    def _add_missing_columns(self) -> None:
+        for table, columns in ADDED_COLUMNS.items():
+            existing = {row["name"] for row in self._conn.execute(f"PRAGMA table_info({table})")}
+            for name, column_type in columns:
+                if name not in existing:
+                    self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {column_type}")
+                    log.info("DB 갱신: %s 표에 %s 열을 추가함", table, name)
 
     def execute(self, sql: str, params: tuple = ()) -> sqlite3.Cursor:
         with self._lock, self._conn:

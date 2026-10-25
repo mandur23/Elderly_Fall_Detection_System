@@ -173,6 +173,12 @@ class GuardianHub:
                     self._drop(user_id, ws, CLOSE_SESSION_ENDED)
         await self.wait_closed()
 
+    async def close_user(self, user_id: int, code: int = CLOSE_SESSION_ENDED) -> None:
+        """이 사용자가 연 보호자 화면을 모두 닫는다(관리자가 계정을 정지·삭제했을 때)."""
+        for ws in list(self._sockets.get(user_id, ())):
+            self._drop(user_id, ws, code)
+        await self.wait_closed()
+
     async def wait_closed(self) -> None:
         """닫는 중인 연결이 모두 닫힐 때까지 기다린다."""
         while self._closing:

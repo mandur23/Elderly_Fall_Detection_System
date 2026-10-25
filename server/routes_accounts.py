@@ -113,7 +113,10 @@ def signup(body: SignupBody, request: Request, response: Response):
 
 @router.post("/api/login")
 def login(body: LoginBody, request: Request, response: Response):
-    user = _accounts(request).authenticate(body.email, body.password)
+    try:
+        user = _accounts(request).authenticate(body.email, body.password)
+    except PermissionError as exc:  # 관리자가 정지한 계정
+        raise _http_error(exc)
     if user is None:
         # 없는 이메일과 틀린 비밀번호를 구분하지 않는다(가입 여부를 알려 주지 않으려고).
         raise HTTPException(status_code=401, detail="이메일 또는 비밀번호가 올바르지 않습니다.")

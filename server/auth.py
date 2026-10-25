@@ -155,6 +155,9 @@ class Accounts:
             return None
         if not verify_password(password or "", row["password_hash"]):
             return None
+        # 비밀번호가 맞은 뒤에만 알려 준다(비밀번호를 모르는 사람에게 정지 여부를 알리지 않으려고).
+        if row["disabled_at"]:
+            raise PermissionError("정지된 계정입니다. 시스템 관리자에게 문의해 주세요.")
         return _public_user(row)
 
     def get_user(self, user_id: int) -> Optional[Dict[str, Any]]:
@@ -162,6 +165,31 @@ class Accounts:
 
     def get_user_by_email(self, email: str) -> Optional[Dict[str, Any]]:
         return _public_user(self.db.query_one("SELECT * FROM users WHERE email = ?", (normalize_email(email),)))
+
+    # --- 계정 정지·삭제 (관리자 페이지) ------------------------------------------
+    # 메모리 상태(열린 화면, 기기 연결) 정리는 server/admin.py가 한다.
+
+    def is_disabled(self, user_id: int) -> bool:
+        row = self.db.query_one("SELECT disabled_at FROM users WHERE id = ?", (user_id,))
+        return bool(row and row["disabled_at"])
+
+    def set_disabled(self, user_id: int, disabled: bool) -> None:
+        """계정을 정지하거나 정지를 푼다. 정지하면 로그인 세션도 모두 지운다. 없는 사용자는 LookupError."""
+        if self.get_user(user_id) is None:
+            raise LookupError("사용자를 찾을 수 없습니다.")
+        if disabled:
+            # 이미 정지된 계정이면 처음 정지한 시각을 그대로 둔다.
+            self.db.execute("UPDATE users SET disabled_at = COALESCE(disabled_at, ?) WHERE id = ?",
+                            (now_iso(), user_id))
+            self.db.execute("DELETE FROM sessions WHERE user_id = ?", (user_id,))
+        else:
+            self.db.execute("UPDATE users SET disabled_at = NULL WHERE id = ?", (user_id,))
+
+    def delete_user(self, user_id: int) -> None:
+        """사용자와 그 세션·보호자 연결·기기·이벤트·알림 기록을 모두 지운다(외래 키 ON DELETE CASCADE)."""
+        cur = self.db.execute("DELETE FROM users WHERE id = ?", (user_id,))
+        if cur.rowcount == 0:
+            raise LookupError("사용자를 찾을 수 없습니다.")
 
     # --- 세션 ---------------------------------------------------------------
 
@@ -183,7 +211,7 @@ class Accounts:
             return None
         row = self.db.query_one(
             "SELECT u.*, s.expires_at AS session_expires_at FROM sessions s "
-            "JOIN users u ON u.id = s.user_id WHERE s.token_hash = ?",
+            "JOIN users u ON u.id = s.user_id WHERE s.token_hash = ? AND u.disabled_at IS NULL",
             (_sha256(token),),
         )
         if row is None:
@@ -279,9 +307,10 @@ class Accounts:
         return [self._link_view(link, link["user_id"]) for link in links]
 
     def guardian_ids_for(self, user_id: int) -> List[int]:
-        """경보를 받을 보호자. 수락한 연결만 센다."""
+        """경보를 받을 보호자. 수락한 연결만 세고, 관리자가 정지한 보호자 계정은 뺀다."""
         rows = self.db.query(
-            "SELECT guardian_id FROM guardians WHERE user_id = ? AND status = ? ORDER BY guardian_id",
+            "SELECT g.guardian_id FROM guardians g JOIN users u ON u.id = g.guardian_id "
+            "WHERE g.user_id = ? AND g.status = ? AND u.disabled_at IS NULL ORDER BY g.guardian_id",
             (user_id, GUARDIAN_ACCEPTED),
         )
         return [r["guardian_id"] for r in rows]

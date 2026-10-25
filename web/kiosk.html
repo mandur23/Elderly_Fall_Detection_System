@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <!-- 현장 화면(Pi 디스플레이)은 확대·축소가 필요 없고 실수로 확대되면 버튼이 화면 밖으로 나간다 -->
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+  <meta name="referrer" content="no-referrer">
+  <title>현장 화면 - 낙상 감지</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="/static/css/style.css">
+  <link rel="stylesheet" href="/static/css/kiosk.css">
+</head>
+<body class="kiosk state-loading">
+  <!-- 로그인 메뉴 없음: Pi에서 Chromium 키오스크 모드로 띄우고, 기기 키로 서버에 묻는다 -->
+  <main class="kiosk-main" aria-live="assertive">
+    <p id="k-title" class="k-title">연결하는 중…</p>
+    <p id="k-message" class="k-message">서버에 연결하고 있습니다.</p>
+    <button id="k-ok" class="k-ok hidden" type="button">괜찮아요</button>
+    <p id="k-feedback" class="k-feedback" role="status"></p>
+  </main>
+  <footer class="kiosk-foot">
+    <span id="k-device"></span>
+    <span id="k-clock"></span>
+  </footer>
+
+  <script type="module" src="/static/js/kiosk.js"></script>
+</body>
+</html>

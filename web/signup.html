@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#0b57d0">
+  <title>회원가입 - 낙상 감지</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+  <header class="site-header"></header>
+
+  <main>
+    <h1>회원가입</h1>
+    <p class="muted">보호받는 분과 보호자 모두 각자 가입합니다. 가입한 뒤 마이페이지에서 서로 연결합니다.</p>
+
+    <form id="signup-form" class="card form" novalidate>
+      <div class="field">
+        <label for="name">이름</label>
+        <input id="name" name="name" type="text" autocomplete="name" maxlength="100" required>
+        <span class="hint">보호자 화면과 경보 알림에 이 이름이 보입니다.</span>
+      </div>
+      <div class="field">
+        <label for="email">이메일</label>
+        <input id="email" name="email" type="email" autocomplete="email" inputmode="email"
+               autocapitalize="off" spellcheck="false" maxlength="254" required>
+        <span class="hint">로그인할 때 아이디로 씁니다.</span>
+      </div>
+      <div class="field">
+        <label for="password">비밀번호</label>
+        <input id="password" name="password" type="password" autocomplete="new-password"
+               minlength="8" maxlength="200" required aria-describedby="pw-hint">
+        <span id="pw-hint" class="hint">8자 이상으로 정해 주세요.</span>
+      </div>
+      <div class="field">
+        <label for="password2">비밀번호 확인</label>
+        <input id="password2" name="password2" type="password" autocomplete="new-password" required>
+      </div>
+      <p id="error" class="form-error hidden" role="alert"></p>
+      <button id="submit" class="btn btn-big btn-block" type="submit">가입하기</button>
+    </form>
+
+    <p>이미 가입하셨나요? <a href="/login">로그인</a></p>
+  </main>
+
+  <script type="module">
+    import { api, clearMeCache } from '/static/js/api.js';
+    import { renderNav, $, show, hide, errorText } from '/static/js/ui.js';
+
+    const info = await renderNav();
+    if (info && info.user) location.replace('/mypage');
+
+    const PASSWORD_MIN = 8;   // 서버(auth.py PASSWORD_MIN_LENGTH)와 같은 값
+    const form = $('#signup-form');
+    const error = $('#error');
+    const button = $('#submit');
+
+    // 문제가 있는 칸을 표시하고 그 칸으로 커서를 옮긴다
+    function showError(msg, input) {
+      error.textContent = msg;
+      show(error);
+      for (const el of form.querySelectorAll('input')) el.removeAttribute('aria-invalid');
+      if (input) {
+        input.setAttribute('aria-invalid', 'true');
+        input.focus();
+      }
+    }
+
+    form.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      hide(error);
+      const name = $('#name').value.trim();
+      const email = $('#email').value.trim();
+      const password = $('#password').value;
+      const password2 = $('#password2').value;
+
+      // 서버도 같은 규칙으로 검사하지만, 먼저 알려 주면 다시 입력하는 수고가 줄어든다
+      if (!name) return showError('이름을 입력해 주세요.', $('#name'));
+      if (!email || !email.includes('@')) return showError('이메일을 바르게 입력해 주세요.', $('#email'));
+      if (password.length < PASSWORD_MIN) {
+        return showError(`비밀번호는 ${PASSWORD_MIN}자 이상이어야 합니다.`, $('#password'));
+      }
+      if (password !== password2) return showError('비밀번호 확인이 일치하지 않습니다.', $('#password2'));
+
+      button.disabled = true;
+      button.textContent = '가입 중…';
+      try {
+        // 가입하면 서버가 바로 로그인 쿠키를 준다
+        await api('/api/signup', { method: 'POST', json: { name, email, password } });
+        clearMeCache();
+        location.replace('/mypage');
+      } catch (err) {
+        const msg = errorText(err);
+        showError(msg, msg.includes('이메일') ? $('#email') : msg.includes('비밀번호') ? $('#password')
+          : msg.includes('이름') ? $('#name') : null);
+        button.disabled = false;
+        button.textContent = '가입하기';
+      }
+    });
+
+    $('#name').focus();
+  </script>
+</body>
+</html>

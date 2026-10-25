@@ -27,15 +27,22 @@ const FIELD_NAMES = {
   auth: '구독 키',
 };
 
+// 받침이 있으면 '을/이', 없으면 '를/가'를 붙인다 (예: 이메일을, 비밀번호를)
+function particle(word, withBatchim, without) {
+  const code = word.charCodeAt(word.length - 1) - 0xac00;
+  const batchim = code >= 0 && code <= 11171 && code % 28 !== 0;
+  return word + (batchim ? withBatchim : without);
+}
+
 // 422 오류 하나({loc, type, msg})를 사람이 읽을 수 있는 문장으로
 function describeValidationError(item) {
   const loc = Array.isArray(item.loc) ? item.loc : [];
   const key = loc[loc.length - 1];
   const field = FIELD_NAMES[key] || '입력값';
   const type = String(item.type || '');
-  if (type === 'missing') return `${field}을(를) 입력해 주세요.`;
-  if (type.includes('too_long')) return `${field}이(가) 너무 깁니다.`;
-  if (type.includes('too_short')) return `${field}이(가) 너무 짧습니다.`;
+  if (type === 'missing') return `${particle(field, '을', '를')} 입력해 주세요.`;
+  if (type.includes('too_long')) return `${particle(field, '이', '가')} 너무 깁니다.`;
+  if (type.includes('too_short')) return `${particle(field, '이', '가')} 너무 짧습니다.`;
   if (type === 'json_invalid') return '요청 형식이 올바르지 않습니다.';
   return `${field} 형식이 올바르지 않습니다.`;
 }

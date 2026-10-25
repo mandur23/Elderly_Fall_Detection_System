@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#0b57d0">
+  <title>로그인 - 낙상 감지</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+  <header class="site-header"></header>
+
+  <main>
+    <h1>로그인</h1>
+
+    <form id="login-form" class="card form" novalidate>
+      <div class="field">
+        <label for="email">이메일</label>
+        <input id="email" name="email" type="email" autocomplete="username" inputmode="email"
+               autocapitalize="off" spellcheck="false" required>
+      </div>
+      <div class="field">
+        <label for="password">비밀번호</label>
+        <input id="password" name="password" type="password" autocomplete="current-password" required>
+      </div>
+      <p id="error" class="form-error hidden" role="alert"></p>
+      <button id="submit" class="btn btn-big btn-block" type="submit">로그인</button>
+    </form>
+
+    <p>처음이신가요? <a id="signup-link" href="/signup">회원가입</a></p>
+  </main>
+
+  <script type="module">
+    import { api, clearMeCache } from '/static/js/api.js';
+    import { renderNav, $, show, hide, errorText } from '/static/js/ui.js';
+
+    // 로그인 뒤 돌아갈 주소. 다른 사이트로 보내는 데 쓰이지 않게(open redirect) 이 사이트 안의 경로만 받는다.
+    function safeNext() {
+      const next = new URLSearchParams(location.search).get('next') || '';
+      if (!next.startsWith('/') || next.startsWith('//') || next.includes('\\')) return '/';
+      if (next.startsWith('/login') || next.startsWith('/signup')) return '/';
+      return next;
+    }
+    const next = safeNext();
+
+    // 이미 로그인되어 있으면 바로 넘어간다
+    const info = await renderNav();
+    if (info && info.user) location.replace(next);
+
+    const form = $('#login-form');
+    const error = $('#error');
+    const button = $('#submit');
+
+    function showError(msg) {
+      error.textContent = msg;
+      show(error);
+    }
+
+    form.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      hide(error);
+      const email = $('#email').value.trim();
+      const password = $('#password').value;
+      if (!email || !password) {
+        showError('이메일과 비밀번호를 모두 입력해 주세요.');
+        (email ? $('#password') : $('#email')).focus();
+        return;
+      }
+      button.disabled = true;
+      button.textContent = '로그인 중…';
+      try {
+        await api('/api/login', { method: 'POST', json: { email, password } });
+        clearMeCache();
+        location.replace(next);
+      } catch (err) {
+        showError(errorText(err));
+        $('#password').select();
+        button.disabled = false;
+        button.textContent = '로그인';
+      }
+    });
+
+    $('#email').focus();
+  </script>
+</body>
+</html>

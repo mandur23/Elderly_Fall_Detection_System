@@ -1,0 +1,158 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#0b57d0">
+  <title>카메라 감지 - 낙상 감지</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="/static/css/style.css">
+  <style>
+    /* 카메라 화면에서만 쓰는 모양. 공통 모양은 style.css에 있다. */
+
+    /* 연결·감지 상태를 한 줄에 */
+    .status-row {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 8px 12px;
+      margin-bottom: 8px;
+    }
+    .status-row .label { font-weight: 700; min-width: 4.5em; }
+
+    /* 미리보기: 화면 폭에 맞추고 4:3 비율을 지킨다 */
+    .preview {
+      position: relative;
+      background: #111;
+      border-radius: var(--radius);
+      overflow: hidden;
+      aspect-ratio: 4 / 3;
+      margin-bottom: var(--gap);
+    }
+    .preview video {
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+      display: block;
+    }
+    .preview .placeholder {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      text-align: center;
+      padding: 16px;
+      color: #e5e7eb;
+      font-weight: 700;
+    }
+
+    /*
+     * 낙상 의심·경보 때 화면 전체를 덮는 안내.
+     * 휴대폰은 방 한쪽에 세워 두고, 사용자는 바닥에 있을 수 있으므로 멀리서도 보이게 크게 만든다.
+     */
+    .alert-overlay {
+      position: fixed;
+      inset: 0;
+      z-index: 50;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      gap: 20px;
+      padding: 24px 16px;
+      text-align: center;
+      background: var(--suspect);
+      color: var(--suspect-text);
+      overflow-y: auto;
+    }
+    .alert-overlay.is-alarm { background: var(--alarm); color: #fff; }
+    .alert-overlay .alert-title { font-size: 2.2rem; font-weight: 800; margin: 0; }
+    .alert-overlay .alert-text { font-size: 1.6rem; font-weight: 700; line-height: 1.45; margin: 0; }
+    .alert-overlay .alert-step { font-size: 1.2rem; font-weight: 700; min-height: 1.6em; margin: 0; }
+    .alert-overlay .btn-ok {
+      min-height: 110px;
+      font-size: 2.2rem;
+      font-weight: 800;
+      border-radius: 18px;
+      border: 4px solid #fff;
+      background: var(--normal);
+      color: #fff;
+      width: 100%;
+      max-width: 560px;
+      margin: 0 auto;
+    }
+    .alert-overlay .btn-ok:hover { background: #166a31; }
+    .alert-overlay .alert-foot { font-size: 1rem; margin: 0; }
+    .alert-overlay .alert-foot button {
+      min-height: 48px;
+      background: transparent;
+      color: inherit;
+      border: 2px solid currentColor;
+      border-radius: 10px;
+      padding: 6px 14px;
+      font: inherit;
+      font-weight: 700;
+      cursor: pointer;
+    }
+  </style>
+</head>
+<body>
+  <header class="site-header"></header>
+
+  <main>
+    <h1>카메라 감지</h1>
+
+    <p class="notice">이 휴대폰을 방 한쪽에 세워 두면 넘어짐을 살핍니다.
+      화면을 켜 둔 채 충전기에 꽂아 두세요. 다른 앱으로 바꾸거나 화면을 끄면 감지가 멈춥니다.</p>
+
+    <!-- 시작할 수 없는 이유, 권한 거부 같은 오류 -->
+    <p id="camera-error" class="form-error hidden" role="alert"></p>
+
+    <section class="card" aria-labelledby="h-status">
+      <h2 id="h-status" class="sr-only">상태</h2>
+      <div class="status-row">
+        <span class="label">서버</span>
+        <span id="conn-badge" class="badge badge-offline">연결 안 됨</span>
+      </div>
+      <div class="status-row">
+        <span class="label">감지</span>
+        <span id="state-badge" class="badge badge-offline">멈춤</span>
+      </div>
+      <p id="status-detail" class="muted small" aria-live="polite">‘감지 시작’을 누르면 카메라와 마이크를 켭니다.</p>
+    </section>
+
+    <div class="preview">
+      <!-- muted·playsinline: 휴대폰에서 소리 없이 화면 안에서 재생되게 한다(전체 화면으로 바뀌지 않게) -->
+      <video id="preview" muted playsinline autoplay></video>
+      <div id="preview-placeholder" class="placeholder">카메라가 꺼져 있습니다</div>
+    </div>
+
+    <div class="btn-row">
+      <button id="start-btn" class="btn btn-big btn-block" type="button">감지 시작</button>
+      <button id="stop-btn" class="btn btn-outline-danger btn-big btn-block hidden" type="button">감지 중지</button>
+    </div>
+
+    <section class="card" style="margin-top:16px" aria-labelledby="h-help">
+      <h2 id="h-help">이렇게 동작합니다</h2>
+      <ul>
+        <li>넘어진 것 같으면 휴대폰이 “괜찮으신가요?” 하고 묻고 5초 동안 대답을 듣습니다.</li>
+        <li>“괜찮아요”라고 말하거나 화면의 큰 버튼을 누르면 끝납니다.</li>
+        <li>대답이 없거나 “도와주세요”라고 하면 보호자에게 알립니다.</li>
+      </ul>
+      <p class="muted small">이 기능은 보조 수단이며 응급 신고를 대신하지 않습니다.</p>
+    </section>
+  </main>
+
+  <!-- 낙상 의심(주황)·경보(빨강) 때 화면 전체를 덮는 안내 -->
+  <div id="alert-overlay" class="alert-overlay hidden" role="alertdialog" aria-modal="true"
+       aria-labelledby="alert-title" aria-describedby="alert-text">
+    <p id="alert-title" class="alert-title">상태 확인 중</p>
+    <p id="alert-text" class="alert-text">괜찮으신가요? 괜찮으시면 '괜찮아요'라고 말씀하시거나 아래 버튼을 눌러 주세요.</p>
+    <p id="alert-step" class="alert-step" aria-live="assertive"></p>
+    <button id="ok-btn" class="btn-ok" type="button">괜찮아요</button>
+    <p class="alert-foot"><button id="overlay-stop-btn" type="button">감지 중지</button></p>
+  </div>
+
+  <script type="module" src="/static/js/camera.js"></script>
+</body>
+</html>

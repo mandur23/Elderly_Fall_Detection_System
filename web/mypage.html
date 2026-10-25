@@ -1,0 +1,414 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#0b57d0">
+  <title>마이페이지 - 낙상 감지</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+  <header class="site-header"></header>
+
+  <main>
+    <h1>마이페이지</h1>
+
+    <!-- 내 정보 -->
+    <section class="card" aria-labelledby="h-me">
+      <h2 id="h-me">내 정보</h2>
+      <p><span class="muted">이름</span><br><strong id="my-name"></strong></p>
+      <p><span class="muted">이메일</span><br><strong id="my-email"></strong></p>
+    </section>
+
+    <!-- 나에게 온 보호자 요청 (있을 때만 위에 크게 보인다) -->
+    <section id="requests-card" class="card hidden" aria-labelledby="h-requests">
+      <h2 id="h-requests">받은 보호자 요청</h2>
+      <p class="muted">수락하면 그분의 상태와 경보를 보호자 화면에서 볼 수 있습니다.</p>
+      <ul id="requests" class="list"></ul>
+    </section>
+
+    <!-- 내 보호자 -->
+    <section class="card" aria-labelledby="h-guardians">
+      <h2 id="h-guardians">내 보호자</h2>
+      <p class="muted">넘어짐이 감지되면 여기 연결된 보호자에게 알림이 갑니다.
+        보호자의 이메일로 요청하면, 보호자가 자기 마이페이지에서 수락해야 연결됩니다.</p>
+      <ul id="guardians" class="list"></ul>
+      <form id="guardian-form" class="form" novalidate style="margin-top:12px">
+        <div class="field">
+          <label for="guardian-email">보호자 이메일</label>
+          <div class="inline-form">
+            <input id="guardian-email" type="email" inputmode="email" autocapitalize="off" spellcheck="false"
+                   autocomplete="off" maxlength="254" placeholder="예: family@example.com" required>
+            <button class="btn" type="submit">보호자 요청</button>
+          </div>
+          <span class="hint">보호자도 먼저 회원가입이 되어 있어야 합니다.</span>
+        </div>
+      </form>
+    </section>
+
+    <!-- 내가 보호하는 사람 -->
+    <section class="card" aria-labelledby="h-wards">
+      <h2 id="h-wards">내가 보호하는 사람</h2>
+      <ul id="wards" class="list"></ul>
+      <p><a href="/guardian">보호자 화면에서 상태 보기 →</a></p>
+    </section>
+
+    <!-- 내 기기 -->
+    <section class="card" aria-labelledby="h-devices">
+      <h2 id="h-devices">내 기기</h2>
+      <p class="muted">휴대폰은 <a href="/camera">카메라 감지</a> 화면을 처음 열 때 자동으로 등록됩니다.</p>
+      <ul id="devices" class="list"></ul>
+
+      <h3 style="margin-top:16px">Pi 기기 추가</h3>
+      <form id="device-form" class="form" novalidate>
+        <div class="field">
+          <label for="device-name">기기 이름</label>
+          <div class="inline-form">
+            <input id="device-name" type="text" maxlength="100" placeholder="예: 거실 카메라" autocomplete="off" required>
+            <button class="btn" type="submit">Pi 기기 추가</button>
+          </div>
+        </div>
+      </form>
+
+      <!-- 새 Pi 기기의 키: 지금 한 번만 보여 준다 (서버에는 해시만 남는다) -->
+      <div id="new-device" class="highlight-box hidden" role="region" aria-labelledby="h-new-device">
+        <h3 id="h-new-device">새 기기가 만들어졌습니다</h3>
+        <p><strong>기기 키는 지금 한 번만 보입니다.</strong> 아래 값을 Pi 설정에 넣어 주세요.
+          잃어버리면 기기를 지우고 새로 추가해야 합니다. 다른 사람에게 보여 주지 마세요.</p>
+
+        <p class="muted small" style="margin-bottom:0">기기 번호 / 기기 키</p>
+        <code id="new-device-ids" class="secret"></code>
+
+        <p class="muted small" style="margin-bottom:0">Pi 설정 파일(pi-client.env)에 넣을 내용</p>
+        <code id="new-device-env" class="secret"></code>
+        <button id="copy-env" class="btn btn-secondary btn-small" type="button">설정 내용 복사</button>
+
+        <p class="muted small" style="margin:12px 0 0">Pi 화면(현장 화면) 주소</p>
+        <code id="new-device-kiosk" class="secret"></code>
+        <button id="copy-kiosk" class="btn btn-secondary btn-small" type="button">주소 복사</button>
+
+        <div class="btn-row">
+          <button id="close-new-device" class="btn" type="button">적어 두었습니다 (닫기)</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- 알림 -->
+    <section class="card" aria-labelledby="h-push">
+      <h2 id="h-push">경보 알림</h2>
+      <p>보호자는 알림을 켜 두면 브라우저를 닫아도 휴대폰으로 경보가 옵니다.</p>
+      <p class="muted small">보안 연결(https://)로 접속해야 켤 수 있고, 안드로이드 휴대폰의 Chrome을 권장합니다.
+        아이폰은 Safari에서 "홈 화면에 추가"를 한 뒤 그 아이콘으로 열어야 합니다.
+        알림은 이 휴대폰(브라우저)에만 켜지므로, 휴대폰을 바꾸면 다시 켜 주세요.</p>
+      <p><span id="push-badge" class="badge badge-offline">확인 중</span></p>
+      <p id="push-message" class="muted"></p>
+      <button id="push-toggle" class="btn btn-block" type="button" disabled>알림 켜기</button>
+    </section>
+  </main>
+
+  <script type="module">
+    import { api, me } from '/static/js/api.js';
+    import { renderNav, $, show, hide, el, toast, errorText, formatTime } from '/static/js/ui.js';
+    import { pushStatus, enablePush, disablePush, syncPush } from '/static/js/push.js';
+
+    // 버튼을 누르는 동안 막아 두어 두 번 보내지 않게 한다
+    async function busy(button, work) {
+      button.disabled = true;
+      try {
+        return await work();
+      } finally {
+        button.disabled = false;
+      }
+    }
+
+    // 목록이 비었을 때 보여 줄 한 줄
+    function emptyItem(text) {
+      return el('li', { class: 'empty', text });
+    }
+
+    // 상대방 표시: 이름(이메일). 수락 전에는 서버가 이름을 주지 않는다(이메일로 실명을 알아내지 못하게).
+    function personLines(user, nameFallback) {
+      return [
+        el('div', { class: 'title', text: user.name || nameFallback }),
+        el('div', { class: 'sub', text: user.email }),
+      ];
+    }
+
+    // --- 보호자 연결 ---------------------------------------------------------
+
+    function renderLinks(info) {
+      // 내 보호자 (요청 중 + 연결됨)
+      const guardians = $('#guardians');
+      guardians.replaceChildren();
+      if (!info.guardians.length) guardians.append(emptyItem('아직 등록한 보호자가 없습니다.'));
+      for (const link of info.guardians) {
+        const accepted = link.status === 'accepted';
+        const remove = el('button', {
+          class: 'btn btn-outline-danger btn-small', type: 'button',
+          text: accepted ? '연결 해제' : '요청 취소',
+        });
+        remove.addEventListener('click', () => {
+          const who = link.user.name || link.user.email;
+          const question = accepted
+            ? `${who}님과 보호자 연결을 해제할까요? 해제하면 더 이상 경보가 가지 않습니다.`
+            : `${who}님에게 보낸 보호자 요청을 취소할까요?`;
+          if (!confirm(question)) return;
+          busy(remove, () => removeLink(link.link_id, accepted ? '연결을 해제했습니다.' : '요청을 취소했습니다.'));
+        });
+        guardians.append(el('li', { class: 'list-item' }, [
+          el('div', { class: 'grow' }, personLines(link.user, '수락 전 (이름은 수락 후 보입니다)')),
+          el('span', { class: `badge ${accepted ? 'badge-accepted' : 'badge-pending'}`, text: accepted ? '연결됨' : '요청 중' }),
+          remove,
+        ]));
+      }
+
+      // 받은 요청 (수락·거절)
+      const requests = $('#requests');
+      requests.replaceChildren();
+      for (const link of info.requests) {
+        const accept = el('button', { class: 'btn btn-small', type: 'button', text: '수락' });
+        const reject = el('button', { class: 'btn btn-outline-danger btn-small', type: 'button', text: '거절' });
+        accept.addEventListener('click', () => busy(accept, async () => {
+          try {
+            await api(`/api/guardians/${link.link_id}/accept`, { method: 'POST' });
+            toast(`${link.user.name}님의 보호자가 되었습니다.`, 'success');
+            await refresh();
+          } catch (err) {
+            toast(errorText(err), 'error');
+            await refresh();
+          }
+        }));
+        reject.addEventListener('click', () => {
+          if (!confirm(`${link.user.name}님의 보호자 요청을 거절할까요?`)) return;
+          busy(reject, () => removeLink(link.link_id, '요청을 거절했습니다.'));
+        });
+        requests.append(el('li', { class: 'list-item' }, [
+          el('div', { class: 'grow' }, personLines(link.user, '')),
+          el('div', { class: 'btn-row', style: 'margin:0' }, [accept, reject]),
+        ]));
+      }
+      if (info.requests.length) show('#requests-card'); else hide('#requests-card');
+
+      // 내가 보호하는 사람
+      const wards = $('#wards');
+      wards.replaceChildren();
+      if (!info.wards.length) {
+        wards.append(emptyItem('아직 없습니다. 보호할 분이 마이페이지에서 내 이메일로 보호자 요청을 보내면, 위의 "받은 보호자 요청"에서 수락할 수 있습니다.'));
+      }
+      for (const link of info.wards) {
+        const remove = el('button', { class: 'btn btn-outline-danger btn-small', type: 'button', text: '연결 해제' });
+        remove.addEventListener('click', () => {
+          if (!confirm(`${link.user.name}님과 연결을 해제할까요? 해제하면 그분의 경보를 받지 않습니다.`)) return;
+          busy(remove, () => removeLink(link.link_id, '연결을 해제했습니다.'));
+        });
+        wards.append(el('li', { class: 'list-item' }, [
+          el('div', { class: 'grow' }, personLines(link.user, '')),
+          remove,
+        ]));
+      }
+    }
+
+    async function removeLink(linkId, doneMessage) {
+      try {
+        await api(`/api/guardians/${linkId}`, { method: 'DELETE' });
+        toast(doneMessage, 'success');
+      } catch (err) {
+        toast(errorText(err), 'error');
+      }
+      await refresh();
+    }
+
+    $('#guardian-form').addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const input = $('#guardian-email');
+      const email = input.value.trim();
+      if (!email) {
+        toast('보호자의 이메일을 입력해 주세요.', 'error');
+        input.focus();
+        return;
+      }
+      const button = event.target.querySelector('button[type="submit"]');
+      await busy(button, async () => {
+        try {
+          await api('/api/guardians', { method: 'POST', json: { email } });
+          input.value = '';
+          toast('보호자 요청을 보냈습니다. 보호자가 마이페이지에서 수락하면 연결됩니다.', 'success');
+          await refresh();
+        } catch (err) {
+          toast(errorText(err), 'error');
+          input.focus();
+        }
+      });
+    });
+
+    // --- 기기 ---------------------------------------------------------------
+
+    const KIND_LABELS = { pi: 'Pi 현장 단말', phone: '휴대폰 카메라' };
+
+    async function loadDevices() {
+      const list = $('#devices');
+      let devices;
+      try {
+        ({ devices } = await api('/api/devices'));
+      } catch (err) {
+        list.replaceChildren(emptyItem('기기 목록을 불러오지 못했습니다. ' + errorText(err)));
+        return;
+      }
+      list.replaceChildren();
+      if (!devices.length) list.append(emptyItem('등록된 기기가 없습니다.'));
+      for (const device of devices) {
+        const seen = device.last_seen_at ? `마지막 접속: ${formatTime(device.last_seen_at)}` : '아직 접속한 적 없음';
+        const remove = el('button', { class: 'btn btn-outline-danger btn-small', type: 'button', text: '삭제' });
+        remove.addEventListener('click', () => {
+          if (!confirm(`"${device.name}" 기기를 삭제할까요?\n삭제하면 이 기기는 더 이상 접속할 수 없고 감지가 멈춥니다.`)) return;
+          busy(remove, async () => {
+            try {
+              await api(`/api/devices/${device.id}`, { method: 'DELETE' });
+              toast('기기를 삭제했습니다.', 'success');
+            } catch (err) {
+              toast(errorText(err), 'error');
+            }
+            await loadDevices();
+          });
+        });
+        list.append(el('li', { class: 'list-item', 'data-device-id': device.id }, [
+          el('div', { class: 'grow' }, [
+            el('div', { class: 'title', text: device.name }),
+            el('div', { class: 'sub', text: `${KIND_LABELS[device.kind] || device.kind} · 번호 ${device.id}` }),
+            el('div', { class: 'sub', text: seen }),
+          ]),
+          remove,
+        ]));
+      }
+    }
+
+    // 복사: clipboard API는 보안 연결에서만 되므로, 안 되면 글자를 선택해 두고 길게 눌러 복사하게 안내한다
+    async function copyText(text, node) {
+      try {
+        await navigator.clipboard.writeText(text);
+        toast('복사했습니다.', 'success');
+      } catch {
+        const range = document.createRange();
+        range.selectNodeContents(node);
+        const sel = getSelection();
+        sel.removeAllRanges();
+        sel.addRange(range);
+        toast('자동 복사가 되지 않습니다. 선택된 글자를 길게 눌러 복사해 주세요.', 'warn');
+      }
+    }
+
+    let newDevice = null;   // 방금 만든 기기의 키. 닫으면 지워서 화면과 메모리에 남기지 않는다
+
+    function showNewDevice(device, key) {
+      const kioskUrl = `${location.origin}/kiosk?device_id=${device.id}&key=${encodeURIComponent(key)}`;
+      const env = `PI_SERVER_URL=${location.origin}\nPI_DEVICE_ID=${device.id}\nPI_DEVICE_KEY=${key}`;
+      newDevice = { env, kioskUrl };
+      $('#new-device-ids').textContent = `기기 번호: ${device.id}\n기기 키: ${key}`;
+      $('#new-device-env').textContent = env;
+      $('#new-device-kiosk').textContent = kioskUrl;
+      show('#new-device');
+      $('#new-device').scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }
+
+    function closeNewDevice() {
+      newDevice = null;
+      for (const id of ['#new-device-ids', '#new-device-env', '#new-device-kiosk']) $(id).textContent = '';
+      hide('#new-device');
+    }
+
+    $('#copy-env').addEventListener('click', () => newDevice && copyText(newDevice.env, $('#new-device-env')));
+    $('#copy-kiosk').addEventListener('click', () => newDevice && copyText(newDevice.kioskUrl, $('#new-device-kiosk')));
+    $('#close-new-device').addEventListener('click', () => {
+      if (confirm('키를 적어 두셨나요? 닫으면 다시 볼 수 없습니다.')) closeNewDevice();
+    });
+
+    $('#device-form').addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const input = $('#device-name');
+      const name = input.value.trim();
+      if (!name) {
+        toast('기기 이름을 입력해 주세요.', 'error');
+        input.focus();
+        return;
+      }
+      const button = event.target.querySelector('button[type="submit"]');
+      await busy(button, async () => {
+        try {
+          const { device, key } = await api('/api/devices', { method: 'POST', json: { name, kind: 'pi' } });
+          input.value = '';
+          showNewDevice(device, key);
+          await loadDevices();
+        } catch (err) {
+          toast(errorText(err), 'error');
+        }
+      });
+    });
+
+    // --- 알림 ---------------------------------------------------------------
+
+    const PUSH_BADGE = {
+      on: ['badge-normal', '켜짐'],
+      off: ['badge-offline', '꺼짐'],
+      denied: ['badge-alarm', '차단됨'],
+      unsupported: ['badge-offline', '사용할 수 없음'],
+      'server-off': ['badge-offline', '서버 설정 없음'],
+    };
+
+    async function renderPush() {
+      const status = await pushStatus();
+      const [cls, label] = PUSH_BADGE[status.state] || PUSH_BADGE.off;
+      const badge = $('#push-badge');
+      badge.className = `badge ${cls}`;
+      badge.textContent = label;
+      $('#push-message').textContent = status.message;
+      const button = $('#push-toggle');
+      button.dataset.state = status.state;
+      button.textContent = status.state === 'on' ? '알림 끄기' : '알림 켜기';
+      button.className = status.state === 'on' ? 'btn btn-secondary btn-block' : 'btn btn-block';
+      // 켤 수 없는 상태에서도 '켜기'를 누르면 이유를 다시 알려 주므로 차단·미지원일 때만 막는다
+      button.disabled = status.state === 'unsupported' || status.state === 'server-off';
+    }
+
+    $('#push-toggle').addEventListener('click', async (event) => {
+      const button = event.currentTarget;
+      button.disabled = true;
+      try {
+        if (button.dataset.state === 'on') {
+          await disablePush();
+          toast('이 휴대폰의 경보 알림을 껐습니다.', 'success');
+        } else {
+          await enablePush();
+          toast('경보 알림을 켰습니다.', 'success');
+        }
+      } catch (err) {
+        toast(errorText(err), 'error');
+      }
+      await renderPush();
+    });
+
+    // --- 화면 전체 ------------------------------------------------------------
+
+    async function refresh() {
+      const info = await me({ force: true });
+      if (!info) {
+        // 로그인이 풀렸다 (다른 탭에서 로그아웃 등)
+        location.href = '/login?next=/mypage';
+        return;
+      }
+      $('#my-name').textContent = info.user.name;
+      $('#my-email').textContent = info.user.email;
+      renderLinks(info);
+    }
+
+    try {
+      await renderNav();
+      await refresh();
+    } catch (err) {
+      toast('정보를 불러오지 못했습니다. ' + errorText(err), 'error');
+    }
+    loadDevices();
+    syncPush().finally(renderPush);
+  </script>
+</body>
+</html>

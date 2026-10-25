@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#0b57d0">
+  <title>보호자 화면 - 낙상 감지</title>
+  <!-- 아이콘 파일 요청(404)을 막는다 -->
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="/static/css/style.css">
+  <style>
+    /* 보호자 화면에서만 쓰는 모양. 공통 모양(버튼, 카드, 배지)은 style.css를 그대로 쓴다. */
+
+    /* 경보 띠: 화면을 내려도 계속 보이도록 위에 붙인다(경보는 놓치면 안 된다). 경보가 있을 때만 나타난다. */
+    .alarm-bar {
+      position: sticky;
+      top: 0;
+      z-index: 50;
+      background: var(--alarm);
+      color: #fff;
+      padding: 12px 16px;
+      box-shadow: 0 4px 14px rgba(0, 0, 0, 0.3);
+    }
+    .alarm-bar .inner { max-width: 720px; margin: 0 auto; display: grid; gap: 10px; }
+    .alarm-bar strong { font-size: 1.2rem; }
+    .alarm-bar .btn { background: #fff; color: var(--alarm); border-color: #fff; }
+    .alarm-bar .btn:hover { background: #fdecea; }
+
+    /* 소리 켜기 안내: 누르기 전까지 크게 보인다(브라우저는 사용자가 한 번 눌러야 소리를 낼 수 있게 한다) */
+    .sound-box {
+      border: 3px solid var(--highlight-border);
+      background: var(--highlight-bg);
+      border-radius: var(--radius);
+      padding: 16px;
+      margin-bottom: var(--gap);
+    }
+    .sound-box p { margin-bottom: 10px; }
+
+    /* 진행 중인 이벤트 카드 */
+    .event-card {
+      border-radius: var(--radius);
+      padding: 16px 18px;
+      margin-bottom: 12px;
+      border: 3px solid var(--alarm);
+      background: #fdecea;
+    }
+    .event-card[data-state="SUSPECT"] { border-color: var(--suspect); background: #fff6d6; }
+    .event-card .head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 6px; }
+    .event-card .who { font-size: 1.25rem; font-weight: 800; flex: 1 1 160px; }
+    .event-card .meta { color: var(--text); margin-bottom: 4px; }
+    .event-card .explain { font-weight: 600; margin-bottom: 10px; }
+
+    /* 사람(주인)별 묶음과 기기 카드 */
+    .owner-group h3 { margin-bottom: 8px; }
+    .device-card {
+      border: 2px solid var(--border);
+      border-left-width: 10px;
+      border-radius: var(--radius);
+      background: var(--surface);
+      padding: 12px 14px;
+      margin-bottom: 10px;
+    }
+    .device-card[data-look="normal"] { border-left-color: var(--normal); }
+    .device-card[data-look="suspect"] { border-left-color: var(--suspect); }
+    .device-card[data-look="alarm"] { border-left-color: var(--alarm); }
+    .device-card[data-look="offline"] { border-left-color: var(--offline); }
+    .device-card .head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+    .device-card .name { font-weight: 800; font-size: 1.1rem; flex: 1 1 150px; }
+    .device-card .sub { color: var(--muted); font-size: 0.95rem; margin-top: 4px; }
+
+    /* 서버와 연결이 끊긴 동안에는 화면의 상태가 오래된 것임을 흐리게 보여 준다 */
+    body.disconnected #devices,
+    body.disconnected #active-events { opacity: 0.6; }
+
+    .history-item .when { font-weight: 700; }
+  </style>
+</head>
+<body>
+  <header class="site-header"></header>
+
+  <!-- 서버 연결 상태 띠 (끊기면 보인다) -->
+  <div id="conn-banner" class="banner" role="status" aria-live="polite">서버에 연결하는 중입니다…</div>
+
+  <!-- 경보 띠: 확인하지 않은 경보가 있을 때만 보인다 -->
+  <div id="alarm-bar" class="alarm-bar hidden" role="alert">
+    <div class="inner">
+      <strong id="alarm-bar-text">경보가 있습니다</strong>
+      <button id="alarm-ack" class="btn btn-block" type="button">확인했어요 (소리 끄기)</button>
+    </div>
+  </div>
+
+  <main>
+    <h1>보호자 화면</h1>
+
+    <!-- 알림 소리 켜기 -->
+    <section id="sound-box" class="sound-box" aria-labelledby="h-sound">
+      <h2 id="h-sound">알림 소리 켜기</h2>
+      <p>경보가 오면 이 화면에서 큰 소리와 진동이 울립니다.
+        휴대폰 브라우저는 한 번 눌러 주어야 소리를 낼 수 있으므로 아래 버튼을 꼭 눌러 주세요.</p>
+      <button id="sound-unlock" class="btn btn-big btn-block" type="button">알림 소리 켜기</button>
+    </section>
+    <p id="sound-on" class="notice hidden">알림 소리가 켜져 있습니다. 이 화면을 열어 두면 경보 때 소리와 진동이 울립니다.
+      <button id="sound-test" class="btn btn-secondary btn-small" type="button">소리 시험</button></p>
+
+    <!-- 진행 중인 경보·확인 -->
+    <section aria-labelledby="h-active">
+      <h2 id="h-active" class="sr-only">진행 중인 상황</h2>
+      <div id="active-events"></div>
+    </section>
+
+    <!-- 연결된 사람이 없을 때 안내 -->
+    <section id="empty-help" class="card hidden" aria-labelledby="h-empty">
+      <h2 id="h-empty">아직 보호하는 분이 없습니다</h2>
+      <p>보호하는 분과 연결하면 그분의 카메라 상태와 경보가 여기에 보입니다.</p>
+      <ol>
+        <li>보호받을 분이 <strong>마이페이지 → 내 보호자</strong>에 내 이메일
+          (<strong id="my-email"></strong>)을 넣어 요청합니다.</li>
+        <li>내가 <a href="/mypage">마이페이지</a>의 <strong>받은 보호자 요청</strong>에서 수락합니다.</li>
+      </ol>
+      <p id="pending-note" class="notice hidden"></p>
+    </section>
+
+    <!-- 사람별 기기 상태 -->
+    <section class="card" aria-labelledby="h-devices">
+      <h2 id="h-devices">현재 상태</h2>
+      <div id="devices"><p class="empty">불러오는 중…</p></div>
+    </section>
+
+    <!-- 최근 기록 -->
+    <section class="card" aria-labelledby="h-history">
+      <h2 id="h-history">최근 기록</h2>
+      <ul id="history" class="list"><li class="empty">불러오는 중…</li></ul>
+    </section>
+
+    <!-- 휴대폰 알림(웹 푸시) -->
+    <section class="card" aria-labelledby="h-push">
+      <h2 id="h-push">휴대폰 알림</h2>
+      <p>알림을 켜 두면 이 화면을 닫아도 경보가 휴대폰 알림으로 옵니다.</p>
+      <p class="muted small">보안 연결(https://)과 안드로이드 Chrome이 필요합니다.
+        아이폰은 Safari에서 "홈 화면에 추가"를 한 뒤 그 아이콘으로 열어야 합니다.</p>
+      <p><span id="push-badge" class="badge badge-offline">확인 중</span></p>
+      <p id="push-message" class="muted"></p>
+      <button id="push-toggle" class="btn btn-block" type="button" disabled>알림 켜기</button>
+    </section>
+
+    <p class="muted small">이 서비스는 보조 수단이며 응급 신고를 대신하지 않습니다. 위급할 때는 119에 먼저 연락해 주세요.</p>
+  </main>
+
+  <script type="module" src="/static/js/guardian.js"></script>
+</body>
+</html>

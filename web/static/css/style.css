@@ -65,9 +65,7 @@ p { margin: 0 0 12px; }
 .site-header {
   background: var(--surface);
   border-bottom: 1px solid var(--border);
-  position: sticky;
-  top: 0;
-  z-index: 10;
+  /* 위에 고정(sticky)하지 않는다: 좁은 휴대폰에서 메뉴가 두 줄이 되면 화면의 큰 부분을 계속 가리기 때문이다 */
 }
 
 .site-header .bar {

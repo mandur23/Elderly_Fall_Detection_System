@@ -1,0 +1,596 @@
+// 모바일 웹 종단 간(e2e) 테스트.
+//
+// 실행: node web/tests/e2e.mjs   (자세한 방법은 web/tests/README.md)
+//
+// 이 스크립트가 하는 일
+// 1. 중앙 서버(python -m server)를 직접 띄운다. 가짜 자세 추정·가짜 음성 인식, 임시 데이터 폴더, 빈 포트를 쓴다.
+//    웹은 서버가 함께 내보내므로(별도 웹 서버 없음) 서버 하나만 띄우면 된다.
+// 2. 실제 Chromium(Playwright)으로 화면을 누르며 시나리오를 차례로 돌린다.
+//    Pi 기기는 Node 22에 들어 있는 WebSocket으로 흉내 낸다(가짜 자세 JSON 프레임을 보낸다).
+// 3. 시나리오마다 PASS/FAIL을 찍고, 하나라도 실패하면 종료 코드 1로 끝낸다. 서버는 항상 끈다.
+//
+// 시나리오는 앞 시나리오가 만든 계정·기기를 이어서 쓴다(실제 사용 순서와 같게).
+// 앞 단계가 실패하면 뒤 단계는 '앞 단계 실패'로 함께 실패한다.
+
+import { createRequire } from 'node:module';
+import { spawn } from 'node:child_process';
+import fs from 'node:fs';
+import net from 'node:net';
+import os from 'node:os';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+// Playwright는 저장소에 설치하지 않고 전역 설치본을 쓴다.
+// ES 모듈의 import는 NODE_PATH(전역 경로)를 보지 않으므로 require로 불러온다.
+const require = createRequire(import.meta.url);
+let chromium;
+try {
+  ({ chromium } = require('playwright'));
+} catch {
+  console.error('playwright를 찾을 수 없습니다. `npm install -g playwright && npx playwright install chromium` 후 다시 실행하세요.');
+  process.exit(2);
+}
+
+const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
+const PYTHON = process.env.PYTHON || findPython();
+const HEADED = process.env.HEADED === '1';
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+function findPython() {
+  // 저장소 안 가상환경이 있으면 그것을, 없으면 PATH의 python3를 쓴다.
+  for (const p of ['.venv/bin/python', 'venv/bin/python', '.venv/Scripts/python.exe']) {
+    if (fs.existsSync(path.join(REPO, p))) return path.join(REPO, p);
+  }
+  return 'python3';
+}
+
+// ---------------------------------------------------------------- 서버 실행
+
+const DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'fall-e2e-'));
+const SERVER_LOG = path.join(DATA_DIR, 'server.log');
+let PORT = 0;
+let BASE = '';
+let server = null;
+
+function freePort() {
+  return new Promise((resolve, reject) => {
+    const s = net.createServer();
+    s.once('error', reject);
+    s.listen(0, '127.0.0.1', () => {
+      const { port } = s.address();
+      s.close(() => resolve(port));
+    });
+  });
+}
+
+async function startServer() {
+  PORT = await freePort();
+  BASE = `http://localhost:${PORT}`;
+  const env = {
+    ...process.env,
+    FALL_POSE_BACKEND: 'fake',     // 프레임 바이트를 관절 좌표 JSON으로 읽는다
+    FALL_STT_BACKEND: 'fake',      // 녹음 바이트를 인식 문장(UTF-8)으로 읽는다
+    FALL_COOKIE_SECURE: '0',       // http://localhost 에서도 로그인 쿠키가 붙게
+    FALL_DATA_DIR: DATA_DIR,
+    FALL_HOST: '127.0.0.1',
+    FALL_PORT: String(PORT),
+    FALL_T1_SECONDS: '0.3',        // 누운 뒤 0.3초면 '확인 중'으로 (기본 2초)
+    // 카메라 화면은 안내(약 1.5초) + 녹음 5초 + 업로드를 거치므로 그보다 넉넉해야 한다.
+    FALL_VOICE_TIMEOUT: '12',
+    PYTHONUNBUFFERED: '1',
+  };
+  // 웹 푸시 키가 환경에 있으면 테스트가 실제 푸시를 시도하므로 지운다.
+  delete env.FALL_VAPID_PRIVATE_KEY;
+  delete env.FALL_VAPID_PUBLIC_KEY;
+  delete env.FALL_SSL_CERT;
+  delete env.FALL_SSL_KEY;
+  const log = fs.openSync(SERVER_LOG, 'a');
+  server = spawn(PYTHON, ['-m', 'server'], { cwd: REPO, env, stdio: ['ignore', log, log] });
+  let exitInfo = null;
+  server.exitPromise = new Promise((r) => server.once('exit', (code, signal) => { exitInfo = { code, signal }; r(); }));
+  for (let i = 0; i < 150; i++) {
+    if (exitInfo) throw new Error(`서버가 바로 종료됨 (코드 ${exitInfo.code}). 로그: ${SERVER_LOG}`);
+    try {
+      const r = await fetch(`${BASE}/api/push/vapid-public-key`);
+      if (r.ok) return;
+    } catch { /* 아직 안 뜸 */ }
+    await sleep(200);
+  }
+  throw new Error(`서버가 30초 안에 뜨지 않음. 로그: ${SERVER_LOG}`);
+}
+
+async function stopServer() {
+  if (!server) return;
+  const s = server;
+  server = null;
+  if (s.exitCode !== null || s.signalCode !== null) return;
+  s.kill('SIGTERM');
+  const done = await Promise.race([s.exitPromise.then(() => true), sleep(5000).then(() => false)]);
+  if (!done) s.kill('SIGKILL');
+}
+
+// Ctrl+C 로 멈춰도 서버가 남지 않게
+for (const sig of ['SIGINT', 'SIGTERM']) {
+  process.on(sig, async () => { await stopServer(); process.exit(130); });
+}
+
+// ---------------------------------------------------------------- 결과 기록
+
+const results = [];   // {name, ok, ms, error}
+const consoleErrors = [];
+
+class CheckError extends Error {}
+function check(cond, message) {
+  if (!cond) throw new CheckError(message);
+}
+function need(value, what) {
+  if (value === undefined || value === null) throw new CheckError(`앞 단계 실패로 ${what} 없음`);
+  return value;
+}
+
+async function scenario(name, fn) {
+  const t0 = Date.now();
+  process.stdout.write(`- ${name} ... `);
+  try {
+    await fn();
+    results.push({ name, ok: true, ms: Date.now() - t0 });
+    console.log(`PASS (${((Date.now() - t0) / 1000).toFixed(1)}s)`);
+  } catch (err) {
+    results.push({ name, ok: false, ms: Date.now() - t0, error: err });
+    console.log(`FAIL (${((Date.now() - t0) / 1000).toFixed(1)}s)`);
+    console.log(`    ${err instanceof CheckError ? err.message : err.stack}`);
+  }
+}
+
+// 페이지의 JS 오류를 모은다. 다음은 페이지 코드 오류가 아니라 브라우저 네트워크 기록이므로 뺀다.
+// - 'Failed to load resource': 로그아웃 상태의 /api/me 401, 틀린 비밀번호 401,
+//   저장소에 없는 /static/audio/ask_status.mp3 404 등 예상한 응답
+// - 'WebSocket connection to': 서버가 연결을 거절·종료했을 때 브라우저가 찍는 기록
+const IGNORED_CONSOLE = [/^Failed to load resource/, /^WebSocket connection to/];
+
+function watchPage(page, tag) {
+  page.on('console', (m) => {
+    if (m.type() !== 'error') return;
+    const text = m.text();
+    if (IGNORED_CONSOLE.some((re) => re.test(text))) return;
+    consoleErrors.push(`[${tag}] console.error: ${text}`);
+  });
+  page.on('pageerror', (e) => consoleErrors.push(`[${tag}] pageerror: ${e.message}`));
+  // 확인 창(삭제·해제 확인)은 모두 '확인'을 누른다.
+  page.on('dialog', (d) => d.accept().catch(() => {}));
+  return page;
+}
+
+// ---------------------------------------------------------------- Pi 흉내
+
+// server/detection/pose.py 의 fake_frame 과 같은 모양
+function fakeFrame(kind, dy = 0) {
+  if (kind === 'standing') {
+    return JSON.stringify({
+      ls: [305, 200 + dy], rs: [335, 200 + dy], lh: [310, 300 + dy], rh: [330, 300 + dy],
+      bbox: [290, 150 + dy, 350, 450 + dy],
+    });
+  }
+  return JSON.stringify({
+    ls: [220, 385 + dy], rs: [220, 415 + dy], lh: [320, 390 + dy], rh: [320, 410 + dy],
+    bbox: [150, 370 + dy, 470, 430 + dy],
+  });
+}
+
+// Pi 클라이언트처럼 /ws/camera 에 붙어 10fps로 프레임을 보낸다.
+// Node의 WebSocket은 헤더를 못 붙이므로 기기 키를 ?key= 로 보낸다(서버가 둘 다 받는다).
+function connectPi(deviceId, key) {
+  const ws = new WebSocket(`ws://localhost:${PORT}/ws/camera?device_id=${deviceId}&key=${encodeURIComponent(key)}`);
+  ws.binaryType = 'arraybuffer';
+  const messages = [];
+  const enc = new TextEncoder();
+  let pose = 'standing';
+  let timer = null;
+  ws.addEventListener('message', (e) => {
+    if (typeof e.data === 'string') messages.push(JSON.parse(e.data));
+  });
+  const opened = new Promise((resolve, reject) => {
+    ws.addEventListener('open', resolve, { once: true });
+    ws.addEventListener('error', () => reject(new Error('Pi WebSocket 연결 실패')), { once: true });
+  });
+  const sendPose = () => {
+    if (ws.readyState === WebSocket.OPEN) ws.send(enc.encode(pose === 'standing' ? fakeFrame('standing') : fakeFrame('lying', 100)));
+  };
+  return {
+    messages,
+    async open() {
+      await opened;
+      timer = setInterval(sendPose, 100);
+    },
+    // 서 있다가 빠르게 내려가 눕는다 → FALLING → (T1 뒤) SUSPECT
+    async fall() {
+      pose = 'standing';
+      await sleep(600);
+      pose = 'lying';
+    },
+    async standUp() {
+      pose = 'standing';
+      await sleep(800);  // 판정기가 '일어선 상태'를 보고 다음 넘어짐을 받을 준비를 하게
+    },
+    async waitVoiceCheck(count) {
+      for (let i = 0; i < 100; i++) {
+        const checks = messages.filter((m) => m.type === 'voice_check');
+        if (checks.length >= count) return checks[count - 1];
+        await sleep(50);
+      }
+      throw new CheckError(`Pi가 ${count}번째 voice_check를 받지 못함`);
+    },
+    close() {
+      clearInterval(timer);
+      ws.close();
+    },
+  };
+}
+
+// Pi처럼 녹음(가짜 STT는 바이트를 문장으로 읽는다)을 multipart로 올린다.
+async function uploadPiVoice(eventId, attempt, key, text) {
+  const form = new FormData();
+  form.append('audio', new Blob([text], { type: 'audio/wav' }), 'reply.wav');
+  form.append('attempt', String(attempt));
+  const r = await fetch(`${BASE}/api/events/${eventId}/voice`, { method: 'POST', body: form, headers: { 'X-Device-Key': key } });
+  return { status: r.status, body: await r.json().catch(() => null) };
+}
+
+// ---------------------------------------------------------------- 공용 동작
+
+async function getJson(ctx, url, headers) {
+  const r = await ctx.request.get(BASE + url, { headers });
+  return { status: r.status(), body: await r.json().catch(() => null) };
+}
+
+async function signupUI(page, user) {
+  await page.goto(BASE + '/signup');
+  await page.fill('#name', user.name);
+  await page.fill('#email', user.email);
+  await page.fill('#password', user.password);
+  await page.fill('#password2', user.password);
+  await page.click('#submit');
+  await page.waitForURL(BASE + '/mypage');
+  await page.waitForFunction((n) => document.querySelector('#my-name').textContent === n, user.name);
+}
+
+async function loginUI(page, user, password = user.password) {
+  await page.goto(BASE + '/login');
+  await page.fill('#email', user.email);
+  await page.fill('#password', password);
+  await page.click('#submit');
+}
+
+async function waitText(page, selector, pattern, timeout = 8000) {
+  await page.waitForFunction(([sel, src]) => {
+    const node = document.querySelector(sel);
+    return node && new RegExp(src).test(node.textContent);
+  }, [selector, pattern.source], { timeout });
+}
+
+async function eventById(ctx, eventId) {
+  const { body } = await getJson(ctx, '/api/events?limit=30');
+  return body.events.find((e) => e.id === eventId);
+}
+
+async function waitEventEnded(ctx, eventId, timeout = 8000) {
+  const end = Date.now() + timeout;
+  while (Date.now() < end) {
+    const ev = await eventById(ctx, eventId);
+    if (ev && ev.ended_at) return ev;
+    await sleep(150);
+  }
+  throw new CheckError(`이벤트 ${eventId}가 ${timeout}ms 안에 끝나지 않음`);
+}
+
+// ---------------------------------------------------------------- 시나리오
+
+const stamp = Date.now();
+const WARD = { name: '김할머니', email: `ward${stamp}@example.com`, password: 'password1' };
+const GUARD = { name: '김보호', email: `guard${stamp}@example.com`, password: 'password2' };
+const OTHER = { name: '이웃', email: `other${stamp}@example.com`, password: 'password3' };
+
+const state = {};  // 시나리오 사이에 넘기는 값 (기기 id, 키, 이벤트 id …)
+
+async function main() {
+  console.log(`서버 시작: ${PYTHON} -m server (데이터 ${DATA_DIR})`);
+  await startServer();
+  console.log(`서버 준비됨: ${BASE}\n`);
+
+  const browser = await chromium.launch({
+    headless: !HEADED,
+    // 가짜 카메라·마이크를 쓰고 권한 창은 자동으로 허용
+    args: ['--use-fake-ui-for-media-stream', '--use-fake-device-for-media-stream', '--autoplay-policy=no-user-gesture-required'],
+  });
+  const newContext = async (opts = {}) => {
+    const ctx = await browser.newContext({ viewport: { width: 360, height: 780 }, locale: 'ko-KR', ...opts });
+    ctx.setDefaultTimeout(10000);  // 한 단계가 막혀도 전체가 2분을 넘지 않게
+    return ctx;
+  };
+
+  const ctxWard = await newContext({ permissions: ['camera', 'microphone'] });
+  const ctxGuard = await newContext();
+  const ctxOther = await newContext();
+  const wardPage = watchPage(await ctxWard.newPage(), 'ward');
+  const guardPage = watchPage(await ctxGuard.newPage(), 'guardian');
+  let pi = null;
+
+  try {
+    await scenario('회원가입·로그아웃·틀린 비밀번호·로그인', async () => {
+      await signupUI(wardPage, WARD);
+      await wardPage.click('.site-nav >> text=로그아웃');
+      await wardPage.waitForURL(BASE + '/');
+      await wardPage.waitForSelector('#logged-out:not(.hidden)');
+      check(await wardPage.isVisible('#logged-out >> text=응급 신고를 대신하지 않습니다'), '첫 화면에 보조 수단 안내가 없음');
+      check((await getJson(ctxWard, '/api/me')).status === 401, '로그아웃 뒤에도 /api/me 가 401이 아님');
+
+      // 로그인이 필요한 화면 → 로그인 화면으로 (next 유지)
+      await wardPage.goto(BASE + '/mypage');
+      await wardPage.waitForURL(/\/login\?next=/);
+
+      await loginUI(wardPage, WARD, 'wrong-password');
+      await wardPage.waitForSelector('#error:not(.hidden)');
+      check((await wardPage.textContent('#error')).includes('올바르지 않습니다'), '틀린 비밀번호 오류 문구가 다름');
+      check(wardPage.url().includes('/login'), '틀린 비밀번호인데 로그인 화면을 벗어남');
+
+      await wardPage.goto(BASE + '/login?next=/mypage');
+      await wardPage.fill('#email', WARD.email);
+      await wardPage.fill('#password', WARD.password);
+      await wardPage.click('#submit');
+      await wardPage.waitForURL(BASE + '/mypage');
+      await wardPage.waitForFunction((n) => document.querySelector('#my-name').textContent === n, WARD.name);
+
+      await signupUI(guardPage, GUARD);
+    });
+
+    await scenario('보호자 요청 → 다른 브라우저에서 수락 → 보호 대상 표시', async () => {
+      await wardPage.goto(BASE + '/mypage');
+      await wardPage.waitForSelector('#guardians li');
+      await wardPage.fill('#guardian-email', GUARD.email);
+      await wardPage.click('#guardian-form button[type=submit]');
+      await wardPage.waitForSelector('#guardians .badge-pending');
+
+      await guardPage.goto(BASE + '/mypage');
+      await guardPage.waitForSelector('#requests-card:not(.hidden)');
+      check((await guardPage.textContent('#requests')).includes(WARD.name), '보호자 쪽에 받은 요청이 없음');
+      await guardPage.click('#requests >> text=수락');
+      await waitText(guardPage, '#wards', new RegExp(WARD.name));
+
+      await wardPage.reload();
+      await wardPage.waitForSelector('#guardians .badge-accepted');
+      check((await wardPage.textContent('#guardians')).includes(GUARD.name), '수락 뒤 보호자 이름이 보이지 않음');
+    });
+
+    await scenario('Pi 기기 추가 → 키는 한 번만 표시', async () => {
+      await wardPage.fill('#device-name', '거실 카메라');
+      await wardPage.click('#device-form button[type=submit]');
+      await wardPage.waitForSelector('#new-device:not(.hidden)');
+      const env = await wardPage.textContent('#new-device-env');
+      const kiosk = await wardPage.textContent('#new-device-kiosk');
+      const id = /PI_DEVICE_ID=(\d+)/.exec(env)?.[1];
+      const key = /PI_DEVICE_KEY=(\S+)/.exec(env)?.[1];
+      check(id && key, `설정 내용에 PI_DEVICE_ID/PI_DEVICE_KEY가 없음: ${env}`);
+      check(kiosk.includes(`/kiosk?device_id=${id}&key=`), `현장 화면 주소가 다름: ${kiosk}`);
+      check((await getJson(ctxWard, `/api/devices/${id}/state`, { 'X-Device-Key': key })).status === 200, '발급된 키로 기기 상태를 볼 수 없음');
+
+      await wardPage.click('#close-new-device');  // '적어 두셨나요?' 확인 창 → 확인
+      await wardPage.waitForSelector('#new-device', { state: 'hidden' });
+      check(!(await wardPage.content()).includes(key), '닫은 뒤에도 키가 화면에 남아 있음');
+      await wardPage.reload();
+      await wardPage.waitForSelector(`#devices li[data-device-id="${id}"]`);
+      check(!(await wardPage.content()).includes(key), '새로 고침 뒤 키가 다시 보임');
+      check(!(await wardPage.evaluate(() => JSON.stringify(localStorage))).includes(key), '키가 localStorage에 저장됨');
+      state.piId = Number(id);
+      state.piKey = key;
+    });
+
+    await scenario('보호자 화면: 스냅샷에 보호 대상의 Pi 기기 표시', async () => {
+      const id = need(state.piId, 'Pi 기기');
+      await guardPage.goto(BASE + '/guardian');
+      await guardPage.waitForSelector('#conn-banner.hidden', { state: 'attached', timeout: 8000 });
+      const card = `.device-card[data-device-id="${id}"]`;
+      await guardPage.waitForSelector(card);
+      check((await guardPage.textContent(`${card} .name`)) === '거실 카메라', '기기 이름이 다름');
+      check((await guardPage.getAttribute(card, 'data-online')) === '0', '접속 전인데 온라인으로 보임');
+      check(!(await guardPage.isVisible('#empty-help')), '보호 대상이 있는데 연결 안내가 보임');
+      // 경보 소리를 미리 켜 둔다 (실제 보호자도 처음에 한 번 누른다)
+      await guardPage.click('#sound-unlock');
+    });
+
+    await scenario('Pi 넘어짐 → 보호자 화면 SUSPECT → "도와주세요" → ALARM → 경보 해제', async () => {
+      const id = need(state.piId, 'Pi 기기');
+      const card = `.device-card[data-device-id="${id}"]`;
+      pi = connectPi(id, state.piKey);
+      await pi.open();
+      await guardPage.waitForSelector(`${card}[data-look="normal"]`, { timeout: 8000 });
+
+      await pi.fall();
+      await guardPage.waitForSelector('#active-events .event-card[data-state="SUSPECT"]', { timeout: 8000 });
+      check((await guardPage.textContent(`${card} .badge`)) === '상태 확인 중', '기기 배지가 상태 확인 중이 아님');
+      check(!(await guardPage.isVisible('#alarm-bar')), 'SUSPECT인데 경보 띠가 보임');
+
+      const vc = await pi.waitVoiceCheck(1);
+      const up = await uploadPiVoice(vc.event_id, vc.attempt, state.piKey, '도와주세요');
+      check(up.status === 200 && up.body?.accepted === true, `음성 업로드가 받아들여지지 않음: ${up.status} ${JSON.stringify(up.body)}`);
+
+      const alarmCard = `#active-events .event-card[data-event-id="${vc.event_id}"][data-state="ALARM"]`;
+      await guardPage.waitForSelector(alarmCard, { timeout: 8000 });
+      check((await guardPage.textContent(alarmCard)).includes('도움 요청'), '경보 카드에 "도움 요청"이 없음');
+      check(await guardPage.isVisible('#alarm-bar'), '경보 띠가 보이지 않음');
+
+      await guardPage.click(`${alarmCard} button[data-action="clear"]`);  // 확인 창 → 확인
+      await guardPage.waitForSelector(alarmCard, { state: 'detached', timeout: 8000 });
+      check(!(await guardPage.isVisible('#alarm-bar')), '해제 뒤에도 경보 띠가 보임');
+      const ev = await waitEventEnded(ctxGuard, vc.event_id);
+      check(ev.result === 'ALERT_HELP' && ev.cleared_by, `서버 기록이 다름: ${JSON.stringify(ev)}`);
+      await waitText(guardPage, '#history', /경보 해제됨/);
+    });
+
+    await scenario('현장 화면(kiosk): 상태 표시 → 괜찮아요로 SUSPECT 해제', async () => {
+      const id = need(state.piId, 'Pi 기기');
+      need(pi, 'Pi 접속');
+      const ctxKiosk = await newContext({ viewport: { width: 800, height: 480 } });
+      const kiosk = watchPage(await ctxKiosk.newPage(), 'kiosk');
+      try {
+        await pi.standUp();
+        await kiosk.goto(`${BASE}/kiosk?device_id=${id}&key=${encodeURIComponent(state.piKey)}`);
+        check(!kiosk.url().includes('key='), `주소창에 기기 키가 남아 있음: ${kiosk.url()}`);
+        await kiosk.waitForSelector('body.state-normal', { timeout: 8000 });
+        check((await kiosk.textContent('#k-title')).includes('정상'), '정상 화면 문구가 다름');
+        check(!(await kiosk.isVisible('#k-ok')), '정상인데 괜찮아요 버튼이 보임');
+
+        const before = pi.messages.filter((m) => m.type === 'voice_check').length;
+        await pi.fall();
+        await kiosk.waitForSelector('body.state-suspect', { timeout: 8000 });
+        check(await kiosk.isVisible('#k-ok'), 'SUSPECT인데 괜찮아요 버튼이 없음');
+        const vc = await pi.waitVoiceCheck(before + 1);
+        await guardPage.waitForSelector(`.event-card[data-event-id="${vc.event_id}"]`, { timeout: 8000 });
+
+        await kiosk.click('#k-ok');
+        await kiosk.waitForSelector('body.state-normal', { timeout: 8000 });
+        const ev = await waitEventEnded(ctxGuard, vc.event_id);
+        check(ev.result === 'CLEARED_BUTTON', `서버 결과가 CLEARED_BUTTON이 아님: ${ev.result}`);
+        check(ev.cleared_by === `device:${id}`, `해제한 쪽이 기기가 아님: ${ev.cleared_by}`);
+        // 보호자 화면에서도 카드가 사라진다
+        await guardPage.waitForSelector(`.event-card[data-event-id="${vc.event_id}"]`, { state: 'detached', timeout: 8000 });
+        const sw = await kiosk.evaluate(() => [document.documentElement.scrollWidth, document.documentElement.scrollHeight]);
+        check(sw[0] <= 800 && sw[1] <= 480, `현장 화면에 스크롤이 생김: ${sw}`);
+      } finally {
+        await ctxKiosk.close();
+      }
+    });
+
+    await scenario('카메라 화면: 가짜 카메라로 접속·전송 → voice_check → 녹음 업로드', async () => {
+      // 실제 카메라 프레임(JPEG)은 가짜 자세 추정기가 읽지 못하므로, 브라우저와 서버 사이에서
+      // 프레임을 가짜 자세 JSON으로 바꿔 서버가 '넘어짐'을 보게 한다. 그 밖의 메시지는 그대로 전달한다.
+      let mode = 'jpeg';
+      let jpegFrames = 0;
+      await wardPage.routeWebSocket(/\/ws\/camera/, (ws) => {
+        const upstream = ws.connectToServer();
+        ws.onMessage((m) => {
+          if (typeof m === 'string') return upstream.send(m);
+          if (m[0] === 0xff && m[1] === 0xd8) jpegFrames++;
+          if (mode === 'jpeg') upstream.send(m);
+          else upstream.send(Buffer.from(mode === 'standing' ? fakeFrame('standing') : fakeFrame('lying', 100)));
+        });
+        upstream.onMessage((m) => ws.send(m));
+        ws.onClose((code, reason) => upstream.close({ code, reason }));
+        upstream.onClose((code, reason) => ws.close({ code, reason }));
+      });
+      // 업로드한 multipart 내용을 확인하려고 페이지의 fetch를 감싼다 (Playwright는 Blob 본문을 보여 주지 않는다).
+      await wardPage.addInitScript(() => {
+        window.__voiceForms = [];
+        const original = window.fetch;
+        window.fetch = function (url, init) {
+          if (/\/voice$/.test(String(url)) && init && init.body instanceof FormData) {
+            const fields = {};
+            for (const [k, v] of init.body.entries()) fields[k] = v instanceof Blob ? { filename: v.name, size: v.size } : v;
+            window.__voiceForms.push(fields);
+          }
+          return original.apply(this, arguments);
+        };
+      });
+      const uploads = [];
+      wardPage.on('response', async (res) => {
+        if (/\/api\/events\/\d+\/voice$/.test(res.url())) uploads.push({ status: res.status(), body: await res.json().catch(() => null) });
+      });
+
+      await wardPage.goto(BASE + '/camera');
+      await wardPage.click('#start-btn');
+      await waitText(wardPage, '#conn-badge', /^연결됨$/, 10000);
+      const { body: list } = await getJson(ctxWard, '/api/devices');
+      const phone = list.devices.find((d) => d.kind === 'phone');
+      check(phone, '휴대폰 기기가 등록되지 않음');
+      state.phoneId = phone.id;
+
+      await sleep(1200);
+      check(jpegFrames >= 5, `JPEG 프레임이 충분히 가지 않음 (${jpegFrames}장)`);
+      const st = await getJson(ctxWard, `/api/devices/${phone.id}/state`);
+      check(st.body.device.online && st.body.device.camera_ok, `서버가 카메라를 온라인으로 보지 않음: ${JSON.stringify(st.body.device)}`);
+      // 보호자 화면에도 휴대폰 카메라가 접속 중으로 보인다
+      await guardPage.waitForSelector(`.device-card[data-device-id="${phone.id}"][data-online="1"]`, { timeout: 8000 });
+
+      mode = 'standing'; await sleep(700);
+      mode = 'lying'; await sleep(1200);
+      mode = 'jpeg';
+      await wardPage.waitForSelector('#alert-overlay:not(.hidden)', { timeout: 8000 });
+      check((await wardPage.textContent('#alert-text')).includes('괜찮으신가요'), '음성 확인 안내 문구가 없음');
+      await waitText(wardPage, '#alert-step', /말씀해 주세요/, 12000);
+
+      for (let i = 0; i < 150 && uploads.length === 0; i++) await sleep(100);
+      check(uploads.length >= 1, '녹음 업로드가 없음');
+      const up = uploads[0];
+      check(up.status === 200 && up.body?.accepted === true, `서버가 업로드를 받지 않음: ${up.status} ${JSON.stringify(up.body)}`);
+      const [form] = await wardPage.evaluate(() => window.__voiceForms);
+      check(form && /^reply\.\w+$/.test(form.audio?.filename || '') && form.audio.size > 0 && form.attempt === '1',
+        `업로드 multipart 모양이 다름: ${JSON.stringify(form)}`);
+
+      // 가짜 STT는 webm을 문장으로 못 읽으므로 '음성 확인 불가' 경보가 된다 → 카메라 화면이 빨간색으로
+      await wardPage.waitForSelector('#alert-overlay.is-alarm', { timeout: 10000 });
+      const { body: evs } = await getJson(ctxWard, '/api/events?limit=5');
+      const ev = evs.events.find((e) => e.device_id === phone.id);
+      check(ev && ev.state === 'ALARM', `카메라 이벤트가 ALARM이 아님: ${JSON.stringify(ev)}`);
+
+      await wardPage.click('#ok-btn');
+      await wardPage.waitForSelector('#alert-overlay', { state: 'hidden', timeout: 8000 });
+      const ended = await waitEventEnded(ctxWard, ev.id);
+      check(ended.cleared_by, '괜찮아요로 해제되지 않음');
+
+      await wardPage.click('#stop-btn');
+      await waitText(wardPage, '#conn-badge', /연결 안 됨/);
+    });
+
+    await scenario('권한: 관계없는 사용자는 기기·이벤트를 볼 수 없음', async () => {
+      const id = need(state.piId, 'Pi 기기');
+      const page = watchPage(await ctxOther.newPage(), 'other');
+      await signupUI(page, OTHER);
+      await page.goto(BASE + '/guardian');
+      await page.waitForSelector('#conn-banner.hidden', { state: 'attached', timeout: 8000 });
+      await sleep(500);
+      check((await page.$$('.device-card')).length === 0, '남의 기기가 보호자 화면에 보임');
+      check((await page.$$('#active-events .event-card')).length === 0, '남의 이벤트가 보임');
+      check(await page.isVisible('#empty-help'), '연결 안내가 보이지 않음');
+      check((await page.textContent('#history')).includes('아직 기록이 없습니다'), '최근 기록에 남의 기록이 보임');
+
+      const events = await getJson(ctxOther, '/api/events?limit=30');
+      check(events.status === 200 && events.body.events.length === 0, '남의 이벤트가 API로 보임');
+      const devices = await getJson(ctxOther, '/api/devices');
+      check(devices.body.devices.length === 0, '남의 기기가 API로 보임');
+      const st = await getJson(ctxOther, `/api/devices/${id}/state`);
+      check(st.status === 403 || st.status === 404, `남의 기기 상태가 보임 (${st.status})`);
+      const { body: wardEvents } = await getJson(ctxWard, '/api/events?limit=1');
+      const r = await ctxOther.request.post(`${BASE}/api/events/${wardEvents.events[0].id}/clear`);
+      check(r.status() === 403 || r.status() === 404, `남의 이벤트를 해제할 수 있음 (${r.status()})`);
+    });
+
+    await scenario('페이지 JS 오류 없음', async () => {
+      check(consoleErrors.length === 0, `콘솔 오류 ${consoleErrors.length}건:\n    ${consoleErrors.join('\n    ')}`);
+    });
+  } finally {
+    if (pi) pi.close();
+    await browser.close().catch(() => {});
+  }
+}
+
+let fatal = null;
+const t0 = Date.now();
+try {
+  await main();
+} catch (err) {
+  fatal = err;
+}
+await stopServer();
+
+const failed = results.filter((r) => !r.ok);
+console.log('\n================ 결과 ================');
+for (const r of results) console.log(`${r.ok ? 'PASS' : 'FAIL'}  ${r.name}`);
+if (fatal) console.log(`FAIL  실행 중단: ${fatal.stack || fatal}`);
+const total = ((Date.now() - t0) / 1000).toFixed(1);
+if (failed.length || fatal) {
+  console.log(`\nFAIL: ${failed.length + (fatal ? 1 : 0)}개 실패 / ${results.length}개 시나리오 (${total}s)`);
+  console.log(`서버 로그: ${SERVER_LOG}`);
+  process.exit(1);
+}
+console.log(`\nPASS: ${results.length}개 시나리오 모두 통과 (${total}s)`);
+fs.rmSync(DATA_DIR, { recursive: true, force: true });
+process.exit(0);

@@ -11,8 +11,8 @@
 // - 서버에서 받은 글(이름, 이메일, 기기 이름, 메모 등)은 모두 ui.el / textContent로 넣는다(innerHTML 금지).
 // - 그래프는 라이브러리 없이 SVG 요소를 직접 만든다.
 
-import { api } from './api.js';
-import { $, $$, el, show, hide, toggle, toast, errorText, formatTime, resultLabel, stateBadge } from './ui.js';
+import { api } from '/static/js/api.js';
+import { $, $$, el, show, hide, toggle, toast, errorText, formatTime, resultLabel, stateBadge } from '/static/js/ui.js';
 
 // ---------------------------------------------------------------- 공통
 
@@ -433,14 +433,19 @@ function renderUserDetail(detail) {
   );
 }
 
+// Pi 클라이언트는 4403(정지)으로 끊기면 다시 접속하지 않는다. 정지를 풀어도 Pi에서 서비스를 다시 시작해야 붙는다.
+const PI_RESTART_NOTE = '정지를 풀어도 Pi 기기는 저절로 다시 연결되지 않습니다. '
+  + '각 Pi에서 \'sudo systemctl restart pi-client\'로 다시 시작해야 합니다.';
+
 async function setDisabled(user, disable) {
   if (disable && !confirm(`${user.name}(${user.email}) 계정을 정지할까요?\n\n`
     + '로그인과 기존 로그인 세션이 막히고, 열린 보호자 화면과 이 사용자 기기의 카메라 연결이 끊깁니다. '
-    + '나중에 \'정지 해제\'로 되돌릴 수 있습니다.')) return;
+    + '나중에 \'정지 해제\'로 되돌릴 수 있습니다.\n\n' + PI_RESTART_NOTE)) return;
   const action = disable ? 'disable' : 'enable';
   try {
     await adminApi(`/admin/api/users/${user.id}/${action}`, { method: 'POST' });
-    toast(disable ? `${user.name} 계정을 정지했습니다.` : `${user.name} 계정의 정지를 풀었습니다.`, 'success');
+    if (disable) toast(`${user.name} 계정을 정지했습니다.`, 'success');
+    else toast(`${user.name} 계정의 정지를 풀었습니다. ${PI_RESTART_NOTE}`, 'success', 10000);
   } catch (err) {
     toast((disable ? '정지하지 못했습니다. ' : '정지를 풀지 못했습니다. ') + errorText(err), 'error');
   }

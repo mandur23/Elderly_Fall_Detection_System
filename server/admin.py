@@ -2,7 +2,7 @@
 
 관리자는 이 시스템을 운영하는 팀이고, 관리자 계정은 따로 없다. 대신 **서버 PC 자신에서 연 요청만**
 받는다. 그래서 이 파일의 핵심은 '이 요청이 정말 서버 PC의 브라우저에서 왔는가'를 확인하는
-local_access_problem()이다. 검사는 네 가지다.
+local_access_problem()이다. 검사는 다섯 가지다.
 
 1. 접속한 주소(request.client.host)가 루프백(127.0.0.0/8, ::1)인가.
    서버 앞에 리버스 프록시가 없으므로 X-Forwarded-For 같은 헤더는 절대 믿지 않는다.
@@ -13,7 +13,11 @@ local_access_problem()이다. 검사는 네 가지다.
    X-Admin-Request: 1 헤더가 있어야 한다. 사용자 정의 헤더가 붙은 다른 출처 요청은 브라우저가
    먼저 CORS 사전 요청을 보내는데 이 서버는 허락하지 않으므로, 다른 사이트의 폼·fetch로
    관리자 동작을 몰래 시키는 것(CSRF)을 막는다.
-4. 실패하면 404. 같은 Wi-Fi의 다른 기기에게 관리자 페이지가 있다는 것조차 알리지 않는다.
+4. 브라우저가 붙이는 Sec-Fetch-Site가 있으면 same-origin(관리자 페이지 자신의 링크·fetch) 또는
+   none(주소창에 직접 입력, 즐겨찾기)이어야 한다. 읽기(GET)도 막는다. 서버 PC에서 연 다른 사이트가
+   a.href='http://localhost:8443/admin/api/events.csv'를 누르게 하면 모든 사용자의 이벤트가
+   그 PC에 내려받아지기 때문이다. 헤더가 없으면 브라우저가 아닌 로컬 도구(curl 등)로 보고 허용한다.
+5. 실패하면 404. 같은 Wi-Fi의 다른 기기에게 관리자 페이지가 있다는 것조차 알리지 않는다.
 
 검사는 두 곳에서 같은 함수로 한다.
 - AdminGuard(미들웨어): /admin 아래 모든 요청을 라우팅·본문 해석 전에 막는다. 라우트 의존성만 쓰면
@@ -66,6 +70,8 @@ ADMIN_PREFIX = "/admin"
 LOCAL_HOSTNAMES = ("localhost", "127.0.0.1", "::1")
 SAFE_METHODS = ("GET", "HEAD")
 ADMIN_REQUEST_HEADER = "x-admin-request"
+# Sec-Fetch-Site 중 받는 값: 같은 출처(관리자 페이지 자신), none(주소창 입력·즐겨찾기)
+ALLOWED_FETCH_SITES = ("same-origin", "none")
 # 관리자 응답에 붙이는 헤더.
 # - 다른 사이트가 관리자 페이지를 iframe에 넣고 버튼을 누르게 속이는 것(클릭재킹)을 막는다.
 #   iframe 안의 요청은 진짜 localhost 출처라 위 3번 검사를 통과하기 때문이다.
@@ -133,7 +139,7 @@ def _origin_is_this_server(origin: Optional[str], host_header: str) -> bool:
 
 
 def local_access_problem(request: Request) -> Optional[str]:
-    """관리자 요청을 받으면 안 되는 이유. 받아도 되면 None (머리말의 검사 1~3)."""
+    """관리자 요청을 받으면 안 되는 이유. 받아도 되면 None (머리말의 검사 1~4)."""
     if not request.app.state.settings.admin_enabled:
         return "관리자 페이지가 꺼져 있음(FALL_ADMIN=0)"
     client = request.client.host if request.client else None
@@ -142,6 +148,9 @@ def local_access_problem(request: Request) -> Optional[str]:
     host_header = request.headers.get("host") or ""
     if _hostname(host_header) not in LOCAL_HOSTNAMES:
         return "Host 헤더가 서버 PC 이름이 아님(DNS 리바인딩 의심)"
+    fetch_site = request.headers.get("sec-fetch-site")
+    if fetch_site is not None and fetch_site.lower() not in ALLOWED_FETCH_SITES:
+        return f"다른 사이트에서 연 요청(Sec-Fetch-Site: {fetch_site})"
     if request.method not in SAFE_METHODS:
         if not _origin_is_this_server(request.headers.get("origin"), host_header):
             return "다른 출처에서 보낸 변경 요청(CSRF 의심)"
@@ -431,6 +440,30 @@ async def admin_page(request: Request):
     if not path.is_file():
         raise HTTPException(status_code=404, detail="페이지가 아직 없습니다.")
     return FileResponse(path, media_type="text/html")
+
+
+# 관리자 페이지 전용 스크립트·스타일(web/admin/). /static에 두면 같은 Wi-Fi의 누구나 받아 가
+# 관리자 페이지가 있다는 것과 관리자 API 모양을 알 수 있으므로, /admin 아래에서 같은 검사를 거쳐 준다.
+# 정해 둔 파일만 연결한다(주소로 다른 파일을 고를 수 없게). 공용 모듈(api.js, ui.js)은 /static에서 받는다.
+ADMIN_ASSETS = {
+    "admin.js": "application/javascript",
+    "admin.css": "text/css",
+}
+
+
+def _asset_handler(name: str, media_type: str):
+    async def asset(request: Request):
+        path = Path(_state(request).settings.web_dir) / "admin" / name
+        if not path.is_file():
+            raise HTTPException(status_code=404, detail="Not Found")
+        return FileResponse(path, media_type=media_type)
+    asset.__name__ = "admin_asset_" + name.replace(".", "_")
+    return asset
+
+
+for _name, _media_type in ADMIN_ASSETS.items():
+    router.add_api_route(f"{ADMIN_PREFIX}/{_name}", _asset_handler(_name, _media_type), methods=["GET"],
+                         include_in_schema=False)
 
 
 # ---------------------------------------------------------------------------

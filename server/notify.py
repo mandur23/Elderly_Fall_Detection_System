@@ -11,6 +11,7 @@
 
 import asyncio
 import logging
+import sqlite3
 from datetime import datetime
 from typing import Any, Dict, Iterable, List, Optional, Set
 
@@ -296,9 +297,16 @@ class Notifier:
         return self._event_locks.setdefault(event_id, asyncio.Lock())
 
     def _current_guardians(self, owner_id: Optional[int], guardian_ids: List[int]) -> List[int]:
-        """그사이 연결이 해제된 보호자를 뺀다. 권한을 잃은 사람에게 늦은 알림이 가지 않게 한다."""
-        rows = self.db.query("SELECT guardian_id FROM guardians WHERE user_id = ? AND status = ?",
-                             (owner_id, GUARDIAN_ACCEPTED))
+        """그사이 연결이 해제되었거나, 관리자가 정지·삭제한 보호자를 뺀다.
+
+        권한을 잃은 사람에게 늦은 알림이 가지 않게 하고, 지워진 보호자의 전송 기록(외래 키)을
+        남기려다 다른 보호자에게 가는 알림까지 멈추는 일을 막는다. 조건은 accounts.guardian_ids_for와 같다.
+        """
+        rows = self.db.query(
+            "SELECT g.guardian_id FROM guardians g JOIN users u ON u.id = g.guardian_id "
+            "WHERE g.user_id = ? AND g.status = ? AND u.disabled_at IS NULL",
+            (owner_id, GUARDIAN_ACCEPTED),
+        )
         linked = {r["guardian_id"] for r in rows}
         return [g for g in guardian_ids if g in linked]
 
@@ -347,11 +355,19 @@ class Notifier:
 
     def _record(self, event_id: int, guardian_id: int, kind: str, channel: str, ok: bool,
                 detail: Optional[str]) -> None:
-        self.db.execute(
-            "INSERT INTO notifications (event_id, guardian_id, kind, channel, state, detail, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (event_id, guardian_id, kind, channel, NOTIFY_SENT if ok else NOTIFY_FAILED, detail, now_iso()),
-        )
+        """전송 결과를 남긴다. 기록에 실패해도 다른 보호자에게 보내는 것은 멈추지 않는다.
+
+        보내는 도중 관리자가 그 보호자(또는 사용자)를 삭제하면 외래 키 때문에 IntegrityError가 난다.
+        그대로 올려 보내면 이 알림과 남은 재시도가 모두 멈춰 다른 보호자가 경보를 못 받는다.
+        """
+        try:
+            self.db.execute(
+                "INSERT INTO notifications (event_id, guardian_id, kind, channel, state, detail, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (event_id, guardian_id, kind, channel, NOTIFY_SENT if ok else NOTIFY_FAILED, detail, now_iso()),
+            )
+        except sqlite3.IntegrityError as e:
+            log.warning("이벤트 %s 알림 기록 못 함 (보호자 %s가 삭제됨?): %s", event_id, guardian_id, e)
 
     # --- 전달 ---
 
@@ -387,6 +403,8 @@ class Notifier:
 
         device = self.db.query_one("SELECT * FROM devices WHERE id = ?", (event_row["device_id"],))
         event = event_public_dict(event_row, device, owner)
+        # 잠금을 기다리는 사이 정지·삭제·연결 해제된 보호자는 뺀다(재시도마다 다시 확인한다).
+        guardian_ids = self._current_guardians(event.get("owner_id"), guardian_ids)
         summary = {gid: {CHANNEL_WEBSOCKET: False, CHANNEL_PUSH: False} for gid in guardian_ids}
 
         # 1) 열린 보호자 화면. 닫혀 있으면 다시 열 때 snapshot으로 받으므로 재시도하지 않는다.
@@ -396,8 +414,9 @@ class Notifier:
             summary[gid][CHANNEL_WEBSOCKET] = ok
             self._record(event_id, gid, kind, CHANNEL_WEBSOCKET, ok, None if ok else "열린 보호자 화면 없음")
 
-        # 2) 웹 푸시
+        # 2) 웹 푸시. 화면 전송(보호자마다 최대 WEBSOCKET_SEND_TIMEOUT초)을 기다리는 사이 바뀌었을 수 있다.
         payload = self.build_push_payload(event, kind, delayed=delayed)
+        guardian_ids = self._current_guardians(event.get("owner_id"), guardian_ids)
         failed = await self._push_round(event_id, guardian_ids, payload, kind, attempt=0, summary=summary)
         if failed and self.settings.push_retry_delays:
             self._start_retry(event, failed, kind)

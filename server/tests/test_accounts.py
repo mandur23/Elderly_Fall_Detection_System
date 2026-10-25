@@ -266,6 +266,20 @@ def test_pi_device_key_returned_once_and_verifies(accounts, db, people):
     assert accounts.verify_device_key(device["id"], other_key) is None
 
 
+def test_device_key_refused_while_owner_suspended(app, accounts, people):
+    """주인 계정이 정지되면 키가 맞아도 기기 키로 여는 API(현장 화면 상태, 해제, 음성 업로드)를 못 쓴다."""
+    device, key = accounts.create_device(people["ward"], "거실 Pi", "pi")
+    accounts.set_disabled(people["ward"], True)
+    assert accounts.verify_device_key(device["id"], key) is None
+    assert device_from_request(make_request(app, headers={"X-Device-Key": key}), device["id"]) is None
+    # 카메라 WebSocket만 키를 따로 확인해 '주인 계정 정지'(4403)라고 알려 준다. 틀린 키는 그래도 거부.
+    assert accounts.verify_device_key(device["id"], key, allow_suspended_owner=True)["id"] == device["id"]
+    assert accounts.verify_device_key(device["id"], "wrong-key", allow_suspended_owner=True) is None
+
+    accounts.set_disabled(people["ward"], False)
+    assert accounts.verify_device_key(device["id"], key)["id"] == device["id"]
+
+
 def test_phone_device_has_no_key(accounts, people):
     device, key = accounts.create_device(people["ward"], "내 휴대폰", "phone")
     assert key is None
@@ -320,6 +334,17 @@ def test_push_subscription_rejects_other_endpoints(accounts, people, endpoint):
     with pytest.raises(ValueError):
         accounts.save_push_subscription(people["guardian"], endpoint, "p", "a")
     assert accounts.push_subscriptions_for([people["guardian"]]) == []
+
+
+def test_push_subscriptions_skip_suspended_users(accounts, people):
+    """정지된 보호자에게는 푸시(재시도 포함)를 보내지 않는다. 정지를 풀면 구독이 그대로 다시 쓰인다."""
+    accounts.save_push_subscription(people["guardian"], "https://fcm.googleapis.com/fcm/send/g", "p", "a")
+    accounts.save_push_subscription(people["other"], "https://fcm.googleapis.com/fcm/send/o", "p", "a")
+    both = [people["guardian"], people["other"]]
+    accounts.set_disabled(people["guardian"], True)
+    assert [s["user_id"] for s in accounts.push_subscriptions_for(both)] == [people["other"]]
+    accounts.set_disabled(people["guardian"], False)
+    assert [s["user_id"] for s in accounts.push_subscriptions_for(both)] == both
 
 
 def test_mark_device_seen(accounts, people):

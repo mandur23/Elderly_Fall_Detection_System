@@ -606,3 +606,68 @@ def test_notify_delayed_alert_is_marked(world, tmp_path, monkeypatch):
     notifier, _, calls = make_notifier(world, tmp_path, monkeypatch, [_sub(2, "e2")])
     asyncio.run(notifier.notify(get_event(world), owner(world), [2], "alert", delayed=True))
     assert "지연 전송" in json.loads(calls[0]["data"])["title"]
+
+
+def test_alert_retry_skips_guardian_suspended_meanwhile(world, tmp_path, monkeypatch):
+    """첫 푸시가 실패한 뒤 관리자가 정지한 보호자에게는 재시도로도 경보를 보내지 않는다."""
+    notifier, _, calls = make_notifier(world, tmp_path, monkeypatch, [_sub(2, "e2"), _sub(3, "e3")],
+                                       outcomes={"e2": "network", "e3": "network"}, push_retry_delays=[0.05])
+
+    async def run():
+        await notifier.notify(get_event(world), owner(world), [2, 3], "alert")
+        world.execute("UPDATE users SET disabled_at = ? WHERE id = 3", (now_iso(),))
+        await notifier.wait_retries()
+    asyncio.run(run())
+
+    endpoints = [c["info"]["endpoint"] for c in calls]
+    assert sorted(endpoints[:2]) == ["e2", "e3"]
+    assert endpoints[2:] == ["e2"]                # 정지된 아들(3)은 재시도에서 빠진다
+
+
+class DeletingWS(FakeWS):
+    """보낼 때 on_send를 부른다. 화면 전송 도중 관리자가 그 보호자를 삭제하는 상황을 만든다."""
+
+    def __init__(self, on_send):
+        super().__init__()
+        self.on_send = on_send
+
+    async def send_json(self, message):
+        await super().send_json(message)
+        self.on_send()
+
+
+def test_guardian_deleted_during_screen_send_does_not_stop_others(world, tmp_path, monkeypatch):
+    """지워진 보호자의 전송 기록(외래 키 오류) 때문에 다른 보호자에게 가는 푸시가 멈추면 안 된다."""
+    notifier, hub, calls = make_notifier(world, tmp_path, monkeypatch, [_sub(2, "e2"), _sub(3, "e3")],
+                                         push_retry_delays=[])
+    hub.register(3, DeletingWS(lambda: world.execute("DELETE FROM users WHERE id = 3")))
+
+    summary = asyncio.run(notifier.notify(get_event(world), owner(world), [2, 3], "alert"))
+
+    assert [c["info"]["endpoint"] for c in calls] == ["e2"]   # 딸(2)은 푸시를 받고, 지워진 아들은 빠진다
+    assert summary[2]["push"] is True
+    assert [(r["guardian_id"], r["channel"], r["state"]) for r in notifications(world)] == [
+        (2, "websocket", "failed"), (2, "push", "sent")]
+
+
+def test_guardian_deleted_during_push_does_not_stop_retries_for_others(world, tmp_path, monkeypatch):
+    notifier, _, calls = make_notifier(world, tmp_path, monkeypatch, [_sub(2, "e2"), _sub(3, "e3")],
+                                       outcomes={"e2": ["network", "ok"], "e3": "network"},
+                                       push_retry_delays=[0.01])
+    send = notifier.push.send_to_users
+
+    async def send_then_delete(user_ids, payload):
+        result = await send(user_ids, payload)
+        world.execute("DELETE FROM users WHERE id = 3")   # 푸시를 보내는 사이 관리자가 아들(3)을 삭제
+        return result
+    monkeypatch.setattr(notifier.push, "send_to_users", send_then_delete)
+
+    async def run():
+        await notifier.notify(get_event(world), owner(world), [2, 3], "alert")   # 오류 없이 끝나야 한다
+        await notifier.wait_retries()
+    asyncio.run(run())
+
+    endpoints = [c["info"]["endpoint"] for c in calls]
+    assert sorted(endpoints[:2]) == ["e2", "e3"] and endpoints[2:] == ["e2"]
+    push_rows = [(r["guardian_id"], r["state"], r["detail"]) for r in notifications(world) if r["channel"] == "push"]
+    assert push_rows == [(2, "failed", "전송 실패"), (2, "sent", "재시도 1회차 성공")]

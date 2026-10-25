@@ -58,6 +58,10 @@ def main() -> None:
         ssl_certfile=settings.ssl_certfile if https else None,
         ssl_keyfile=settings.ssl_keyfile if https else None,
         log_level="info",
+        # 서버 앞에 리버스 프록시가 없으므로 X-Forwarded-For·X-Forwarded-Proto를 절대 믿지 않는다.
+        # 켜 두면(uvicorn 기본값) FORWARDED_ALLOW_IPS 환경변수가 설정된 PC에서 같은 Wi-Fi 기기가
+        # 'X-Forwarded-For: 127.0.0.1'로 접속 주소를 바꿔 관리자 검사(루프백 주소)를 통과한다.
+        proxy_headers=False,
     )
 
 

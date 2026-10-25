@@ -55,7 +55,8 @@ def _authenticate_camera(ws: WebSocket, device_id: int) -> Tuple[Optional[Dict[s
         return None, CLOSE_UNAUTHORIZED, "unknown device"
     owner_disabled = _state(ws).accounts.is_disabled(device["owner_id"])
     if device["kind"] == "pi":
-        if device_from_request(ws, device_id) is None:
+        # 키 검사는 정지 여부와 따로 한다. 키가 맞으면 정지된 주인의 기기에도 '정지'라는 이유를 알려 준다.
+        if device_from_request(ws, device_id, allow_suspended_owner=True) is None:
             return None, CLOSE_UNAUTHORIZED, "bad device key"
         if owner_disabled:
             return None, CLOSE_FORBIDDEN, "owner suspended"

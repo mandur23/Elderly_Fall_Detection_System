@@ -789,6 +789,17 @@ async function main() {
         const r = await rawRequest('GET', p, { Host: `evil.example:${PORT}` });
         check(r.status === 404 && !r.text.includes(WARD.email), `Host가 evil.example인데 ${p}가 ${r.status}`);
       }
+      // 관리자 화면의 스크립트·스타일은 /static(누구나 받음)에 없고, /admin 아래에서 서버 PC에게만 나간다
+      for (const p of ['/static/js/admin.js', '/static/css/admin.css']) {
+        const r = await rawRequest('GET', p, { Host: `localhost:${PORT}` });
+        check(r.status === 404, `${p}가 공개되어 있음 (${r.status})`);
+      }
+      for (const p of ['/admin/admin.js', '/admin/admin.css']) {
+        const local = await rawRequest('GET', p, { Host: `localhost:${PORT}` });
+        check(local.status === 200 && local.headers['cache-control'] === 'no-store', `서버 PC에서 ${p}를 받지 못함 (${local.status})`);
+        const r = await rawRequest('GET', p, { Host: `evil.example:${PORT}` });
+        check(r.status === 404, `Host가 evil.example인데 ${p}가 ${r.status}`);
+      }
       // 변경 요청: X-Admin-Request 없음 / 다른 출처 Origin / Origin 없음
       const disable = `/admin/api/users/${other.id}/disable`;
       const cases = [
@@ -842,9 +853,28 @@ async function main() {
       const detail = await admin.textContent('#user-detail');
       check(detail.includes('거실 카메라') && detail.includes(GUARD.name), `사용자 정보에 기기·보호자가 없음: ${detail}`);
 
+      // 휴대폰 카메라 화면도 감지 중이다. 정지되면 멈추되 기억해 둔 기기 번호는 지우지 않아야 한다
+      // (지우면 정지를 푼 뒤 '감지 시작'에서 같은 휴대폰이 새 기기로 또 등록된다).
+      const cam = watchPage(await ctxWard.newPage(), 'camera-suspend');
+      const phoneKey = `fall.camera.deviceId.${ward.id}`;
+      const storedPhone = () => cam.evaluate((k) => localStorage.getItem(k), phoneKey);
+      await cam.goto(BASE + '/camera');
+      await cam.click('#start-btn');
+      await waitText(cam, '#conn-badge', /^연결됨$/, 10000);
+      const phones = (await getJson(ctxWard, '/api/devices')).body.devices.filter((d) => d.kind === 'phone');
+      check(phones.length === 1 && (await storedPhone()) === String(phones[0].id), `휴대폰 기기가 하나가 아님: ${JSON.stringify(phones)}`);
+
+      let confirmText = '';
+      admin.once('dialog', (d) => { confirmText = d.message(); });   // 확인은 watchPage가 누른다
       await admin.click('#user-detail [data-action="disable"]');   // 확인 창 → 확인
       await admin.waitForSelector('#user-detail [data-action="enable"]');
       await admin.waitForSelector(`#user-table tr[data-user-id="${ward.id}"][data-disabled="1"]`);
+      // Pi 클라이언트는 4403이면 다시 접속하지 않으므로 해제 뒤 다시 시작해야 한다고 알려 준다
+      check(confirmText.includes('sudo systemctl restart pi-client'), `정지 확인 창에 Pi 재시작 안내가 없음: ${confirmText}`);
+
+      await waitText(cam, '#camera-error', /계정이 정지되었습니다/, 8000);
+      check(await cam.isVisible('#start-btn'), '정지 뒤 휴대폰 감지가 멈추지 않음');
+      check((await storedPhone()) === String(phones[0].id), `정지로 끊기자 기억한 휴대폰 기기 번호를 지움: ${await storedPhone()}`);
 
       check((await pi.waitClosed()) === 4403, `Pi 연결이 4403으로 닫히지 않음 (${pi.closeCode})`);
       const retry = connectPi(state.piId, state.piKey);
@@ -863,10 +893,23 @@ async function main() {
         await admin.click('#user-detail [data-action="enable"]');
         await admin.waitForSelector('#user-detail [data-action="disable"]');
         await admin.waitForSelector(`#user-table tr[data-user-id="${ward.id}"][data-disabled="0"]`);
+        await waitText(admin, '.toast-success', /sudo systemctl restart pi-client/, 5000);
         await loginUI(page, WARD);
         await page.waitForURL((u) => !u.pathname.startsWith('/login'));
       } finally {
         await ctxLogin.close();
+      }
+      // 해제 뒤 같은 휴대폰에서 다시 감지를 시작하면 원래 기기로 붙는다(새 기기가 생기지 않는다)
+      try {
+        await loginUI(cam, WARD);
+        await cam.waitForURL((u) => !u.pathname.startsWith('/login'));
+        await cam.goto(BASE + '/camera');
+        await cam.click('#start-btn');
+        await waitText(cam, '#conn-badge', /^연결됨$/, 10000);
+        const again = (await getJson(ctxWard, '/api/devices')).body.devices.filter((d) => d.kind === 'phone');
+        check(again.length === 1 && again[0].id === phones[0].id, `정지 해제 뒤 휴대폰 기기가 새로 생김: ${JSON.stringify(again)}`);
+      } finally {
+        await cam.close();
       }
       // 해제 뒤에는 Pi가 다시 접속된다 (뒤 단계와 finally가 쓰도록 pi를 바꿔 둔다)
       pi = connectPi(state.piId, state.piKey);
@@ -918,6 +961,39 @@ async function main() {
       await admin.waitForSelector(row(falseAlarmId));
       check(await admin.inputValue(`${row(falseAlarmId)} .label-select`) === 'false_alarm', '새로 고친 뒤 라벨이 사라짐');
       check(await admin.inputValue(`${row(falseAlarmId)} .note-input`) === '소파에 털썩 앉음', '새로 고친 뒤 메모가 사라짐');
+    });
+
+    await scenario('관리자 CSV: 서버 PC에서 연 다른 사이트의 링크로는 받지 못함(404), 관리자 화면의 버튼은 그대로', async () => {
+      // 다른 사이트 흉내: 127.0.0.1의 다른 포트에서 연 페이지. localhost:PORT와는 다른 사이트라
+      // 브라우저가 Sec-Fetch-Site: cross-site를 붙인다.
+      const evilPort = await freePort();
+      const evil = http.createServer((req, res) => {
+        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+        res.end(`<!doctype html><title>다른 사이트</title><a id="steal" href="${BASE}/admin/api/events.csv">받기</a>`);
+      });
+      await new Promise((resolve) => evil.listen(evilPort, '127.0.0.1', resolve));
+      const page = await ctxAdmin.newPage();   // 404 응답을 콘솔에 찍으므로 watchPage를 붙이지 않는다
+      try {
+        await page.goto(`http://127.0.0.1:${evilPort}/`);
+        let downloaded = null;
+        page.on('download', (d) => { downloaded = d.suggestedFilename(); });
+        const [res] = await Promise.all([
+          page.waitForResponse((r) => r.url().startsWith(`${BASE}/admin/api/events.csv`)),
+          page.click('#steal'),
+        ]);
+        check(res.status() === 404, `다른 사이트의 링크로 CSV 요청이 ${res.status()}`);
+        await sleep(500);
+        check(downloaded === null, `다른 사이트의 링크로 CSV가 내려받아짐: ${downloaded}`);
+      } finally {
+        await page.close();
+        evil.close();
+      }
+
+      // 관리자 화면 자신의 CSV 버튼(같은 출처)은 그대로 내려받는다
+      await admin.click('#tab-events');
+      const [download] = await Promise.all([admin.waitForEvent('download'), admin.click('#csv-link')]);
+      const text = fs.readFileSync(await download.path(), 'utf8');
+      check(text.replace(/^\uFEFF/, '').startsWith('이벤트 번호,'), `관리자 화면에서 받은 CSV가 다름: ${text.slice(0, 40)}`);
     });
 
     await scenario('관리자 사용자 삭제: 이메일을 정확히 적어야 삭제 → 그 계정으로 로그인 불가', async () => {

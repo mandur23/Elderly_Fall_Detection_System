@@ -304,11 +304,14 @@ function updateStatusText() {
 
 // closeText()용 내부 구분값: 서버가 4401 'device deleted'(감지 중 기기 삭제)로 닫았을 때
 const DEVICE_DELETED = 'device-deleted';
+// 서버가 4403 'owner suspended'(관리자가 이 계정을 정지)로 닫았을 때
+const OWNER_SUSPENDED = 'owner-suspended';
 
 function closeText(code) {
   if (code === 4409) return '다른 화면에서 같은 기기로 감지 중입니다. 이 화면의 감지는 멈췄습니다.';
   if (code === 4401) return '로그인이 풀렸거나 이 기기가 지워졌습니다. 다시 로그인한 뒤 감지를 시작해 주세요.';
   if (code === DEVICE_DELETED) return '마이페이지에서 이 휴대폰 기기가 삭제되어 감지를 멈췄습니다. 다시 쓰려면 ‘감지 시작’을 누르세요(새 기기로 등록됩니다).';
+  if (code === OWNER_SUSPENDED) return '계정이 정지되었습니다. 감지를 멈췄습니다. 시스템 관리자에게 문의해 주세요.';
   if (code === 4403) return '이 기기를 쓸 권한이 없습니다. 이 휴대폰에 로그인한 계정을 확인해 주세요.';
   if (code === 4400) return '잘못된 연결 요청입니다. 화면을 새로 고친 뒤 다시 시도해 주세요.';
   return `서버 연결이 끊겼습니다. (코드 ${code})`;
@@ -343,6 +346,12 @@ async function handleClose(code, info) {
   if (code === 4401 && info && (info.reason === 'device deleted' || info.reason === 'unknown device')) {
     forgetDeviceId();
     stopDetection({ message: closeText(DEVICE_DELETED) });
+    return;
+  }
+  // 관리자가 이 계정을 정지했다(4403 'owner suspended'). 기기는 그대로 내 것이므로 기기 번호를 지우지 않는다.
+  // 지우면 정지가 풀린 뒤 '감지 시작'에서 같은 휴대폰이 새 기기로 또 등록된다.
+  if (code === 4403 && info && info.reason === 'owner suspended') {
+    stopDetection({ message: closeText(OWNER_SUSPENDED) });
     return;
   }
   // 기억해 둔 기기가 다른 계정의 기기면(4403) 새로 등록해 한 번만 다시 붙는다.

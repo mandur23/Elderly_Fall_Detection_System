@@ -70,8 +70,9 @@ function toastArea() {
  * 화면 아래에 잠깐 문구를 띄운다.
  * @param {string} msg
  * @param {'info'|'success'|'error'|'warn'} kind  오류는 읽을 시간이 더 필요하므로 오래 남긴다
+ * @param {number} [ms]  남겨 둘 시간. 긴 안내 문구는 더 길게 준다
  */
-export function toast(msg, kind = 'info') {
+export function toast(msg, kind = 'info', ms = kind === 'error' ? 7000 : 3500) {
   const area = toastArea();
   const item = el('div', { class: `toast toast-${kind}`, text: msg });
   if (kind === 'error') item.setAttribute('role', 'alert');
@@ -79,7 +80,6 @@ export function toast(msg, kind = 'info') {
   area.append(item);
   // 너무 많이 쌓이지 않게 오래된 것부터 지운다
   while (area.children.length > 3) area.firstElementChild.remove();
-  const ms = kind === 'error' ? 7000 : 3500;
   setTimeout(() => item.remove(), ms);
 }
 

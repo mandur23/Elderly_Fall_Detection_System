@@ -356,13 +356,23 @@ class Accounts:
         rows = self.db.query(f"SELECT * FROM devices WHERE owner_id IN ({marks}) ORDER BY id", tuple(owner_ids))
         return [_public_device(r) for r in rows]
 
-    def verify_device_key(self, device_id: int, key: Optional[str]) -> Optional[Dict[str, Any]]:
+    def verify_device_key(self, device_id: int, key: Optional[str],
+                          allow_suspended_owner: bool = False) -> Optional[Dict[str, Any]]:
+        """기기 키가 맞으면 기기. 주인 계정이 정지되었으면 키가 맞아도 None(기기 키로 여는 API를 모두 막는다).
+
+        allow_suspended_owner=True는 카메라 WebSocket만 쓴다. 키가 맞는지 따로 확인한 뒤
+        '주인 계정 정지'(4403)라는 이유를 알려 주려고 할 때다.
+        """
         if not key:
             return None
-        row = self.db.query_one("SELECT * FROM devices WHERE id = ?", (device_id,))
+        row = self.db.query_one(
+            "SELECT d.*, u.disabled_at AS owner_disabled_at FROM devices d JOIN users u ON u.id = d.owner_id "
+            "WHERE d.id = ?", (device_id,))
         if row is None or not row["key_hash"]:
             return None  # 없는 기기이거나 키가 없는 휴대폰 기기
         if not hmac.compare_digest(row["key_hash"], _sha256(key)):
+            return None
+        if row["owner_disabled_at"] and not allow_suspended_owner:
             return None
         return _public_device(row)
 
@@ -396,11 +406,14 @@ class Accounts:
         )
 
     def push_subscriptions_for(self, user_ids: List[int]) -> List[Dict[str, Any]]:
+        """푸시를 보낼 구독. 관리자가 정지한 계정의 구독은 빼서, 정지 뒤에는 재시도로도 알림이 가지 않게 한다."""
         if not user_ids:
             return []
         marks = ",".join("?" for _ in user_ids)
         return self.db.query(
-            f"SELECT * FROM push_subscriptions WHERE user_id IN ({marks}) ORDER BY id", tuple(user_ids)
+            f"SELECT p.* FROM push_subscriptions p JOIN users u ON u.id = p.user_id "
+            f"WHERE p.user_id IN ({marks}) AND u.disabled_at IS NULL ORDER BY p.id",
+            tuple(user_ids),
         )
 
     def delete_push_subscription(self, endpoint: str, user_id: Optional[int] = None) -> None:
@@ -443,11 +456,15 @@ def user_from_websocket(ws: WebSocket) -> Optional[Dict[str, Any]]:
     return _session_user(ws)
 
 
-def device_from_request(conn: Connection, device_id: int) -> Optional[Dict[str, Any]]:
-    """Pi·키오스크를 기기 키로 인증한다. 키는 X-Device-Key 헤더 또는 key 쿼리 파라미터."""
+def device_from_request(conn: Connection, device_id: int,
+                        allow_suspended_owner: bool = False) -> Optional[Dict[str, Any]]:
+    """Pi·키오스크를 기기 키로 인증한다. 키는 X-Device-Key 헤더 또는 key 쿼리 파라미터.
+
+    주인 계정이 정지된 기기는 None이다(Accounts.verify_device_key).
+    """
     key = conn.headers.get("x-device-key") or conn.query_params.get("key")
     accounts: Accounts = conn.app.state.accounts
-    return accounts.verify_device_key(device_id, key)
+    return accounts.verify_device_key(device_id, key, allow_suspended_owner=allow_suspended_owner)
 
 
 def check_origin(conn: Connection) -> bool:

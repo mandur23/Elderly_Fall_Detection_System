@@ -143,6 +143,10 @@ SAME_ORIGIN = {"origin": "https://localhost:8443", "x-admin-request": "1"}
     dict(method="POST", headers=SAME_ORIGIN),
     dict(method="DELETE", headers=SAME_ORIGIN),
     dict(method="POST", host="127.0.0.1:8443", headers={"origin": "http://127.0.0.1:8443", "x-admin-request": "1"}),
+    # Sec-Fetch-Site: 관리자 페이지 자신의 요청(same-origin), 주소창 입력·즐겨찾기(none)
+    dict(headers={"sec-fetch-site": "same-origin"}),
+    dict(headers={"sec-fetch-site": "none"}),
+    dict(method="POST", headers=dict(SAME_ORIGIN, **{"sec-fetch-site": "same-origin"})),
 ])
 def test_local_access_allows_server_pc(kwargs):
     assert local_access_problem(fake_request(**kwargs)) is None
@@ -174,6 +178,11 @@ def test_local_access_allows_server_pc(kwargs):
     dict(method="POST", headers={"origin": "https://localhost:8443", "x-admin-request": "0"}),
     dict(method="DELETE", headers={"origin": "https://evil.example", "x-admin-request": "1"}),
     dict(method="OPTIONS", headers={"origin": "https://evil.example"}),       # CORS 사전 요청도 거부
+    # 4. 서버 PC 브라우저에서 연 다른 사이트가 링크·이미지 등으로 부른 읽기 요청
+    dict(headers={"sec-fetch-site": "cross-site"}),
+    dict(headers={"sec-fetch-site": "same-site"}),     # localhost의 다른 포트
+    dict(headers={"sec-fetch-site": "CROSS-SITE"}),
+    dict(method="POST", headers=dict(SAME_ORIGIN, **{"sec-fetch-site": "cross-site"})),
     # 설정으로 끈 경우
     dict(admin_enabled=False),
 ])
@@ -232,6 +241,109 @@ def test_admin_api_only_from_server_pc(family):
     # /docs(같은 Wi-Fi에서도 열림)에 관리자 API가 나오지 않는다
     paths = main.get("/openapi.json").json()["paths"]
     assert not [p for p in paths if p.startswith("/admin")]
+
+
+def test_admin_get_from_other_site_refused(family):
+    """서버 PC에서 연 다른 사이트가 a.href='http://localhost:8443/admin/api/events.csv'를 누르게 해도 받지 못한다.
+
+    브라우저는 이때 Sec-Fetch-Site: cross-site(같은 localhost의 다른 포트면 same-site)를 붙인다.
+    """
+    bare = admin_client(family.main, headers={})
+    for path in ("/admin/api/events.csv", "/admin/api/users", "/admin", "/admin/admin.js"):
+        for site in ("cross-site", "same-site"):
+            res = bare.get(path, headers={"Sec-Fetch-Site": site})
+            assert (res.status_code, res.json()) == (404, NOT_FOUND), (path, site)
+    # 관리자 페이지 안의 CSV 버튼(same-origin), 주소창 입력(none), 머리글 없는 로컬 도구는 그대로 된다
+    for headers in ({"Sec-Fetch-Site": "same-origin"}, {"Sec-Fetch-Site": "none"}, {}):
+        res = bare.get("/admin/api/events.csv", headers=headers)
+        assert res.status_code == 200 and res.headers["content-type"].startswith("text/csv"), headers
+    web_dir = family.app.state.settings.web_dir
+    web_dir.mkdir(parents=True, exist_ok=True)
+    (web_dir / "admin.html").write_text("<h1>관리자</h1>", encoding="utf-8")
+    assert bare.get("/admin", headers={"Sec-Fetch-Site": "none"}).status_code == 200        # 주소창·즐겨찾기
+    assert bare.get("/admin", headers={"Sec-Fetch-Site": "same-origin"}).status_code == 200
+    assert bare.get("/admin", headers={"Sec-Fetch-Site": "cross-site"}).status_code == 404
+
+
+def test_admin_assets_only_under_guarded_prefix(tmp_path):
+    """관리자 스크립트·스타일은 /static에 없고, /admin 아래에서 서버 PC에게만 나간다."""
+    settings = make_settings(tmp_path)
+    (settings.web_dir / "static" / "js").mkdir(parents=True)
+    (settings.web_dir / "static" / "js" / "api.js").write_text("export const api = 1;", encoding="utf-8")
+    (settings.web_dir / "admin").mkdir()
+    (settings.web_dir / "admin" / "admin.js").write_text("// 관리자", encoding="utf-8")
+    (settings.web_dir / "admin" / "admin.css").write_text("body {}", encoding="utf-8")
+    app, main = start_app(settings)
+    with main:
+        local, remote = admin_client(main), admin_client(main, client=REMOTE)
+        js = local.get("/admin/admin.js", headers={"Sec-Fetch-Site": "same-origin"})
+        assert js.status_code == 200 and js.text == "// 관리자"
+        assert js.headers["content-type"].startswith("application/javascript")
+        assert js.headers["cache-control"] == "no-store"
+        css = local.get("/admin/admin.css")
+        assert css.status_code == 200 and css.headers["content-type"].startswith("text/css")
+        for path in ("/admin/admin.js", "/admin/admin.css"):
+            assert (remote.get(path).status_code, remote.get(path).json()) == (404, NOT_FOUND)
+        # 다른 파일은 고를 수 없다
+        assert local.get("/admin/api.js").status_code == 404
+        # 공용 모듈은 /static에 그대로 있고, 관리자 파일은 /static에 없다
+        assert remote.get("/static/js/api.js").status_code == 200
+        assert remote.get("/static/js/admin.js").status_code == 404
+        assert remote.get("/static/css/admin.css").status_code == 404
+
+
+def test_repository_admin_files_are_not_public():
+    """실제 web/ 폴더: 관리자 파일이 /static 아래에 없고 admin.html이 /admin/ 주소로 부른다."""
+    from server.config import BASE_DIR
+    web = BASE_DIR / "web"
+    assert not (web / "static" / "js" / "admin.js").exists()
+    assert not (web / "static" / "css" / "admin.css").exists()
+    assert (web / "admin" / "admin.js").is_file() and (web / "admin" / "admin.css").is_file()
+    html = (web / "admin.html").read_text(encoding="utf-8")
+    assert 'src="/admin/admin.js"' in html and 'href="/admin/admin.css"' in html
+    assert "/static/js/admin.js" not in html and "/static/css/admin.css" not in html
+
+
+def test_uvicorn_ignores_forwarded_headers(tmp_path, monkeypatch):
+    """python -m server는 X-Forwarded-For를 믿지 않는다(proxy_headers=False).
+
+    uvicorn 기본값(proxy_headers=True)이면 FORWARDED_ALLOW_IPS='*'가 설정된 PC에서 같은 Wi-Fi 기기가
+    'X-Forwarded-For: 127.0.0.1'로 접속 주소를 바꿔 관리자 API를 연다.
+    """
+    import logging
+
+    import uvicorn
+    from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
+
+    from server import __main__ as server_main
+
+    for name, value in {"FALL_DATA_DIR": str(tmp_path / "data"), "FALL_WEB_DIR": str(tmp_path / "web"),
+                        "FALL_POSE_BACKEND": "fake", "FALL_STT_BACKEND": "fake",
+                        "FORWARDED_ALLOW_IPS": "*"}.items():
+        monkeypatch.setenv(name, value)
+    captured = {}
+    monkeypatch.setattr(server_main.uvicorn, "run", lambda app, **kwargs: captured.update(app=app, kwargs=kwargs))
+    loggers = [logging.getLogger(n) for n in ("uvicorn.access", "uvicorn.error")]
+    try:
+        server_main.main()
+    finally:
+        for logger in loggers:
+            for f in [f for f in logger.filters if isinstance(f, server_main.HideDeviceKeys)]:
+                logger.removeFilter(f)
+
+    app = captured["app"]
+    try:
+        assert captured["kwargs"]["proxy_headers"] is False
+        config = uvicorn.Config(app, **captured["kwargs"])
+        config.load()
+        assert config.proxy_headers is False
+        assert not isinstance(config.loaded_app, ProxyHeadersMiddleware)
+        # uvicorn이 실제로 돌릴 앱에 같은 Wi-Fi 기기가 X-Forwarded-For를 붙여 보내도 404
+        remote = TestClient(config.loaded_app, base_url="http://localhost:8443", client=REMOTE)
+        res = remote.get("/admin/api/overview", headers={"X-Forwarded-For": "127.0.0.1"})
+        assert (res.status_code, res.json()) == (404, NOT_FOUND)
+    finally:
+        app.state.db.close()
 
 
 def test_admin_can_be_turned_off(tmp_path):
@@ -373,6 +485,31 @@ def test_disable_blocks_login_sessions_and_devices_then_enable_restores(family):
 
     assert family.admin.post("/admin/api/users/9999/disable").status_code == 404
     assert family.admin.post("/admin/api/users/9999/enable").status_code == 404
+
+
+def test_suspended_owner_device_key_refused_on_http(family):
+    """정지된 주인의 Pi 키로는 현장 화면 상태·해제·음성 업로드를 못 한다. 카메라 연결은 4403 'owner suspended'."""
+    main, owner_id, key = family.main, family.owner.user["id"], family.key
+    key_header = {"X-Device-Key": key}
+    with camera(main, family.device_id, key) as ws:
+        open_camera(ws)
+        event_id = fall_and_get_voice_check(ws)
+        assert family.admin.post(f"/admin/api/users/{owner_id}/disable").status_code == 200
+        assert close_code(ws) == 4403
+
+    assert main.get(f"/api/devices/{family.device_id}/state", headers=key_header).status_code == 401
+    assert main.get(f"/api/devices/{family.device_id}/state?key={key}").status_code == 401
+    assert main.post(f"/api/events/{event_id}/clear", headers=key_header).status_code == 401
+    assert upload(main, event_id, text="괜찮아요", key=key).status_code == 401
+    with main.websocket_connect(f"{WS_BASE}/ws/camera?device_id={family.device_id}&key={key}") as ws:
+        with pytest.raises(WebSocketDisconnect) as exc:
+            recv(ws)
+        assert (exc.value.code, exc.value.reason) == (4403, "owner suspended")
+    # 틀린 키는 정지 여부를 알려 주지 않고 4401
+    assert connect_close_code(main, f"{WS_BASE}/ws/camera?device_id={family.device_id}&key=wrong") == 4401
+
+    family.admin.post(f"/admin/api/users/{owner_id}/enable")
+    assert main.get(f"/api/devices/{family.device_id}/state", headers=key_header).status_code == 200
 
 
 def test_disable_by_guardian_closes_only_that_users_screens(family):

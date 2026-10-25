@@ -34,13 +34,22 @@
 
 2026-10-25에 구조를 다시 계획했습니다. Pi에서 YOLO-Pose가 너무 느려서, 영상 분석과 음성 인식을 중앙 서버(팀원 PC)로 옮기고 Pi와 모바일 웹을 클라이언트로 두는 구조로 바꿉니다. 새 구조는 처음부터 다시 작성하며, 일정과 결정 사항은 [프로젝트 계획](docs/PROJECT_PLAN.md), 구조와 통신 형식은 [시스템 구성](docs/ARCHITECTURE.md)에 있습니다.
 
+### 빠른 실행
+
+```bash
+pip install -r server/requirements.txt
+python run_server.py --make-cert   # 처음 한 번(휴대폰용 HTTPS 인증서). 이후에는 python run_server.py
+```
+
+Windows는 `run_server.bat`을 더블클릭해도 됩니다. 서버와 웹이 함께 켜지고, 서버 PC 브라우저에 **관리자 화면**이 열립니다. 화면에 나온 주소로 휴대폰에서 접속합니다([휴대폰에서 웹 접속하기](docs/PHONE_ACCESS.md)). 장비·모델 없이 화면만 보려면 `python run_server.py --fake`.
+
 새 구조의 코드는 다음과 같습니다.
 
 | 구성 | 위치 |
 | --- | --- |
 | 중앙 서버 | [`server/`](server/README.md) — 실행·설정·테스트 방법 포함 |
 | 모바일 웹 | `web/` — 서버(`python -m server`)가 함께 제공하므로 따로 켤 필요 없음 |
-| Pi 현장 단말 클라이언트 | 별도 저장소 [elderly_fall_detection_pi_client](https://github.com/mandur23/elderly_fall_detection_pi_client) |
+| Pi 현장 단말 클라이언트 | 별도 저장소 [Elderly_Fall_Detection_Pi_Client](https://github.com/mandur23/Elderly_Fall_Detection_Pi_Client) |
 
 아래 코드 구조와 실행 방법은 **이전 구조(Pi 단독)의 시험 구현**에 대한 설명이며, 새 구조를 만들 때 참고용으로 남겨 둡니다. 장비 없이 가상 사람·가상 음성으로 동작을 확인할 수 있지만 실제 장비에서의 동작과 성능은 검증하지 않았습니다.
 

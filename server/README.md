@@ -38,6 +38,24 @@ GPU(NVIDIA)가 있으면 [PyTorch 안내](https://pytorch.org/get-started/locall
 
 ## 실행
 
+### 통합 실행 파일 (권장)
+
+저장소 최상위의 `run_server.py`가 아래 수동 단계를 대신합니다. Windows는 `run_server.bat`, macOS·Linux는 `./run_server.sh`로도 실행할 수 있습니다.
+
+```bash
+python run_server.py --make-cert   # 처음 한 번: mkcert로 HTTPS 인증서(data/cert.pem, data/rootCA.pem) 생성
+python run_server.py               # 평소 실행
+python run_server.py --fake        # 모델 없이 시험
+```
+
+- 패키지가 없으면 설치 명령을 알려 주고 멈춥니다.
+- `data/cert.pem`, `data/key.pem`이 있으면 HTTPS로 켭니다. 없으면 HTTP로 켜고 이 PC에서만 로그인되게 합니다(`FALL_COOKIE_SECURE=0`).
+- 웹 푸시 키가 없으면 `data/vapid_private.pem`을 한 번 만들어 계속 씁니다.
+- 휴대폰·Pi가 접속할 주소를 화면에 보여 주고, 인증서에 지금 Wi-Fi 주소가 빠져 있으면 경고합니다.
+- 서버가 뜨면 이 PC의 브라우저로 관리자 화면을 엽니다(`--no-browser`로 끌 수 있음).
+
+휴대폰 쪽 설정은 [docs/PHONE_ACCESS.md](../docs/PHONE_ACCESS.md)에 있습니다. 아래는 같은 일을 손으로 하는 방법입니다.
+
 ### 장비 없이 시험 (HTTP, 가짜 모델)
 
 ```bash
@@ -129,7 +147,7 @@ python -m pytest server/tests -q
 
 ## 웹·Pi 클라이언트가 알아야 할 것
 
-Pi 클라이언트는 별도 저장소 [elderly_fall_detection_pi_client](https://github.com/mandur23/elderly_fall_detection_pi_client)에 있습니다.
+Pi 클라이언트는 별도 저장소 [Elderly_Fall_Detection_Pi_Client](https://github.com/mandur23/Elderly_Fall_Detection_Pi_Client)에 있습니다.
 
 - **웹페이지 위치:** `web/index.html`, `login.html`, `signup.html`, `mypage.html`, `camera.html`, `guardian.html`, `kiosk.html`, `admin.html`(관리자, 서버 PC 전용. 전용 스크립트·스타일은 `web/admin/`), 서비스 워커는 `web/sw.js`, 그 밖의 파일은 `web/static/`에 두면 서버가 자동으로 제공합니다. `mypage`, `camera`, `guardian`은 로그인하지 않으면 로그인 화면으로 보냅니다.
 - **카메라 연결:** `wss://<서버>/ws/camera?device_id=N` (휴대폰은 로그인 쿠키, Pi는 `&key=<기기 키>` 또는 `X-Device-Key` 헤더). 바이너리 메시지 1개 = JPEG 1장.

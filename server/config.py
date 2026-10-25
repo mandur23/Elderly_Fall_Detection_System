@@ -69,6 +69,8 @@ class Settings:
     voice_max_attempts: int = 2
     # 음성 확인 요청 후 녹음이 올라오기까지 기다리는 시간(안내 재생 + 녹음 + 전송 여유)
     voice_reply_timeout_seconds: float = field(default_factory=lambda: _env_float("FALL_VOICE_TIMEOUT", 20.0))
+    # 음성 확인 중 기기 연결이 끊겼을 때 다시 접속하기를 기다리는 시간. 그래도 없으면 '확인 불가' 경보.
+    device_reconnect_grace_seconds: float = 3.0
     store_voice_text: bool = False
     # 부정 표현은 '괜찮아'보다 먼저 검사한다 ("안 괜찮아요" -> 도움 요청).
     keywords_negated_safe: List[str] = field(default_factory=lambda: ["안괜찮", "안괜찬", "괜찮지않", "괜찮지안"])

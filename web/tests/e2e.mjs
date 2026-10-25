@@ -15,6 +15,7 @@
 import { createRequire } from 'node:module';
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
+import http from 'node:http';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
@@ -186,9 +187,11 @@ function connectPi(deviceId, key) {
   const enc = new TextEncoder();
   let pose = 'standing';
   let timer = null;
+  let closeCode = null;   // 서버가 닫은 코드 (계정 정지 → 4403)
   ws.addEventListener('message', (e) => {
     if (typeof e.data === 'string') messages.push(JSON.parse(e.data));
   });
+  ws.addEventListener('close', (e) => { closeCode = e.code; clearInterval(timer); });
   const opened = new Promise((resolve, reject) => {
     ws.addEventListener('open', resolve, { once: true });
     ws.addEventListener('error', () => reject(new Error('Pi WebSocket 연결 실패')), { once: true });
@@ -198,6 +201,12 @@ function connectPi(deviceId, key) {
   };
   return {
     messages,
+    get closeCode() { return closeCode; },
+    async waitClosed(timeout = 5000) {
+      for (let i = 0; i < timeout / 50 && closeCode === null; i++) await sleep(50);
+      if (closeCode === null) throw new CheckError('서버가 Pi 연결을 끊지 않음');
+      return closeCode;
+    },
     async open() {
       await opened;
       timer = setInterval(sendPose, 100);
@@ -281,6 +290,39 @@ async function waitEventEnded(ctx, eventId, timeout = 8000) {
     await sleep(150);
   }
   throw new CheckError(`이벤트 ${eventId}가 ${timeout}ms 안에 끝나지 않음`);
+}
+
+// 서버에 머리글을 마음대로 정해 요청한다. Node의 fetch는 Host 머리글을 바꿔도 무시하고 실제 주소를 보내므로,
+// 'Host: evil.example'(DNS 리바인딩 흉내) 같은 확인은 node:http로 한다.
+function rawRequest(method, urlPath, headers = {}, body = undefined) {
+  return new Promise((resolve, reject) => {
+    const req = http.request({ host: '127.0.0.1', port: PORT, method, path: urlPath, headers }, (res) => {
+      const chunks = [];
+      res.on('data', (c) => chunks.push(c));
+      res.on('end', () => {
+        const text = Buffer.concat(chunks).toString('utf8');
+        let json = null;
+        try { json = JSON.parse(text); } catch { /* JSON이 아님 */ }
+        resolve({ status: res.statusCode, headers: res.headers, text, json });
+      });
+    });
+    req.on('error', reject);
+    if (body !== undefined) req.write(body);
+    req.end();
+  });
+}
+
+// 서버 PC 브라우저가 보내는 것과 같은 관리자 요청 (localhost, 같은 출처 Origin, X-Admin-Request)
+function adminRequest(method, urlPath, json = undefined) {
+  const headers = { Host: `localhost:${PORT}`, 'X-Admin-Request': '1' };
+  if (method !== 'GET') headers.Origin = `http://localhost:${PORT}`;
+  if (json !== undefined) headers['Content-Type'] = 'application/json';
+  return rawRequest(method, urlPath, headers, json === undefined ? undefined : JSON.stringify(json));
+}
+
+async function adminUserByEmail(email) {
+  const { json } = await adminRequest('GET', '/admin/api/users?query=' + encodeURIComponent(email));
+  return json.users.find((u) => u.email === email);
 }
 
 // ---------------------------------------------------------------- 시나리오
@@ -678,6 +720,232 @@ async function main() {
         await page.close();
       }
     });
+
+    // ------------------------------------------------------------ 관리자 페이지 (/admin)
+    // 서버 PC 화면(넓은 창)에서 연다. 관리자 페이지는 로그인과 상관없으므로 로그인하지 않은 브라우저를 쓴다.
+    const ctxAdmin = await newContext({ viewport: { width: 1280, height: 900 } });
+    const admin = watchPage(await ctxAdmin.newPage(), 'admin');
+
+    await scenario('관리자 현황: localhost·127.0.0.1에서 열림, 기기·진행 중 이벤트 표시(2초 자동 갱신)', async () => {
+      const id = need(state.piId, 'Pi 기기');
+      need(pi, 'Pi 접속');
+      await admin.goto(BASE + '/admin');
+      check((await admin.title()).startsWith('관리자 (서버 PC 전용)'), `제목이 다름: ${await admin.title()}`);
+      check(!(await admin.$('.site-nav')), '관리자 페이지에 사용자용 메뉴가 붙음');
+      const row = `#device-table tr[data-device-id="${id}"]`;
+      await admin.waitForSelector(`${row}[data-online="1"]`);
+      const rowText = await admin.textContent(row);
+      check(rowText.includes('거실 카메라') && rowText.includes(WARD.name), `기기 줄에 이름·주인이 없음: ${rowText}`);
+      check((await admin.textContent(`${row} .badge`)) === '정상 감시 중', '기기 상태 배지가 다름');
+      check((await admin.textContent('#stat-users .value')) === '3', '사용자 수가 3이 아님');
+      check((await admin.textContent('#server-info')).includes('fake'), '서버 정보에 자세 추정 방식이 없음');
+
+      // 넘어짐 → 다시 불러오지 않아도(자동 갱신) 진행 중 이벤트에 나타난다
+      await pi.standUp();
+      const before = pi.messages.filter((m) => m.type === 'voice_check').length;
+      await pi.fall();
+      const vc = await pi.waitVoiceCheck(before + 1);
+      const item = `#active-events li[data-event-id="${vc.event_id}"]`;
+      await admin.waitForSelector(item, { timeout: 5000 });
+      check((await admin.textContent(item)).includes('거실 카메라'), '진행 중 이벤트에 기기 이름이 없음');
+      check((await admin.textContent('#stat-active .value')) === '1', '진행 중 이벤트 수가 1이 아님');
+
+      // Pi가 '괜찮아요'로 답하면 목록에서 사라진다
+      const up = await uploadPiVoice(vc.event_id, vc.attempt, state.piKey, '괜찮아요');
+      check(up.status === 200 && up.body?.accepted === true, `음성 업로드가 받아들여지지 않음: ${up.status}`);
+      await admin.waitForSelector(item, { state: 'detached', timeout: 6000 });
+      const ev = await waitEventEnded(ctxGuard, vc.event_id);
+      check(ev.result === 'CLEARED_VOICE', `서버 결과가 CLEARED_VOICE가 아님: ${ev.result}`);
+      state.voiceClearedEventId = vc.event_id;
+
+      // 폭 1024px에서도 화면 전체가 가로로 넘치지 않는다(넓은 표는 표 안에서만 스크롤)
+      await admin.setViewportSize({ width: 1024, height: 768 });
+      for (const tab of ['overview', 'users', 'events']) {
+        await admin.click(`#tab-${tab}`);
+        await sleep(300);
+        const w = await admin.evaluate(() => document.documentElement.scrollWidth);
+        check(w <= 1024, `${tab} 탭이 1024px에서 가로로 넘침 (${w}px)`);
+      }
+      await admin.setViewportSize({ width: 1280, height: 900 });
+      await admin.click('#tab-overview');
+
+      // 127.0.0.1로 열어도 된다
+      const page = watchPage(await ctxAdmin.newPage(), 'admin-127');
+      try {
+        await page.goto(`http://127.0.0.1:${PORT}/admin`);
+        await page.waitForSelector(row);
+      } finally {
+        await page.close();
+      }
+    });
+
+    await scenario('관리자 접근 제한: 다른 Host·X-Admin-Request 없음·다른 출처의 변경 요청은 404', async () => {
+      const other = need(await adminUserByEmail(OTHER.email), '이웃 사용자');
+      const ok = await adminRequest('GET', '/admin/api/overview');
+      check(ok.status === 200 && ok.headers['x-frame-options'] === 'DENY', `서버 PC 요청이 거부됨 (${ok.status})`);
+
+      // DNS 리바인딩 흉내: 접속은 127.0.0.1이지만 Host가 다른 사이트 이름
+      for (const p of ['/admin', '/admin/api/overview', '/admin/api/users']) {
+        const r = await rawRequest('GET', p, { Host: `evil.example:${PORT}` });
+        check(r.status === 404 && !r.text.includes(WARD.email), `Host가 evil.example인데 ${p}가 ${r.status}`);
+      }
+      // 변경 요청: X-Admin-Request 없음 / 다른 출처 Origin / Origin 없음
+      const disable = `/admin/api/users/${other.id}/disable`;
+      const cases = [
+        { Host: `localhost:${PORT}`, Origin: `http://localhost:${PORT}` },
+        { Host: `localhost:${PORT}`, Origin: 'http://evil.example', 'X-Admin-Request': '1' },
+        { Host: `localhost:${PORT}`, Origin: `http://127.0.0.1:${PORT}`, 'X-Admin-Request': '1' },
+        { Host: `localhost:${PORT}`, 'X-Admin-Request': '1' },
+      ];
+      for (const headers of cases) {
+        const r = await rawRequest('POST', disable, headers);
+        check(r.status === 404, `막아야 할 변경 요청이 ${r.status}: ${JSON.stringify(headers)}`);
+      }
+
+      // 실제 브라우저: 다른 출처(여기서는 127.0.0.1)의 페이지가 localhost 관리자 API를 부르면
+      // X-Admin-Request 머리글 때문에 사전 요청(CORS)에서 막히고, 머리글 없는 단순 요청은 서버가 404로 거부한다.
+      // CORS 차단은 콘솔 오류를 찍으므로 watchPage를 붙이지 않는다.
+      const page = await ctxAdmin.newPage();
+      try {
+        await page.goto(`http://127.0.0.1:${PORT}/`);
+        const outcome = await page.evaluate(async (url) => {
+          const out = {};
+          try {
+            await fetch(url, { method: 'POST', headers: { 'X-Admin-Request': '1' } });
+            out.withHeader = 'sent';
+          } catch { out.withHeader = 'blocked'; }
+          try {
+            await fetch(url, { method: 'POST', mode: 'no-cors' });
+            out.simple = 'sent';
+          } catch { out.simple = 'blocked'; }
+          return out;
+        }, `${BASE}${disable}`);
+        check(outcome.withHeader === 'blocked', `다른 출처의 사용자 정의 머리글 요청이 막히지 않음: ${JSON.stringify(outcome)}`);
+      } finally {
+        await page.close();
+      }
+      const after = await adminUserByEmail(OTHER.email);
+      check(after && !after.disabled_at, '다른 출처의 요청으로 계정이 정지됨');
+    });
+
+    await scenario('관리자 사용자: 정지 → 로그인 거부·세션 삭제·Pi 연결 끊김(4403) → 해제 → 다시 로그인', async () => {
+      need(pi, 'Pi 접속');
+      const ward = need(await adminUserByEmail(WARD.email), '보호 대상 사용자');
+      await admin.click('#tab-users');
+      await admin.fill('#user-search', WARD.email);
+      await admin.waitForFunction((id) => {
+        const rows = document.querySelectorAll('#user-table tbody tr');
+        return rows.length === 1 && rows[0].dataset.userId === String(id);
+      }, ward.id);
+      await admin.click(`#user-table tr[data-user-id="${ward.id}"]`);
+      await waitText(admin, '#user-detail', new RegExp(WARD.email.replace(/[.]/g, '\\.')));
+      const detail = await admin.textContent('#user-detail');
+      check(detail.includes('거실 카메라') && detail.includes(GUARD.name), `사용자 정보에 기기·보호자가 없음: ${detail}`);
+
+      await admin.click('#user-detail [data-action="disable"]');   // 확인 창 → 확인
+      await admin.waitForSelector('#user-detail [data-action="enable"]');
+      await admin.waitForSelector(`#user-table tr[data-user-id="${ward.id}"][data-disabled="1"]`);
+
+      check((await pi.waitClosed()) === 4403, `Pi 연결이 4403으로 닫히지 않음 (${pi.closeCode})`);
+      const retry = connectPi(state.piId, state.piKey);
+      await retry.open().catch(() => {});
+      check((await retry.waitClosed()) === 4403, `정지 중 Pi 재접속이 4403으로 거부되지 않음 (${retry.closeCode})`);
+      retry.close();
+      check((await getJson(ctxWard, '/api/me')).status === 401, '정지 뒤에도 기존 로그인 세션이 살아 있음');
+
+      const ctxLogin = await newContext();
+      try {
+        const page = watchPage(await ctxLogin.newPage(), 'suspended-login');
+        await loginUI(page, WARD);
+        await page.waitForSelector('#error:not(.hidden)');
+        check((await page.textContent('#error')).includes('정지된 계정'), `정지 안내 문구가 다름: ${await page.textContent('#error')}`);
+
+        await admin.click('#user-detail [data-action="enable"]');
+        await admin.waitForSelector('#user-detail [data-action="disable"]');
+        await admin.waitForSelector(`#user-table tr[data-user-id="${ward.id}"][data-disabled="0"]`);
+        await loginUI(page, WARD);
+        await page.waitForURL((u) => !u.pathname.startsWith('/login'));
+      } finally {
+        await ctxLogin.close();
+      }
+      // 해제 뒤에는 Pi가 다시 접속된다 (뒤 단계와 finally가 쓰도록 pi를 바꿔 둔다)
+      pi = connectPi(state.piId, state.piKey);
+      await pi.open();
+      await sleep(300);
+      check(pi.closeCode === null && pi.messages.some((m) => m.type === 'hello'), '정지 해제 뒤 Pi가 다시 접속하지 못함');
+    });
+
+    await scenario('관리자 이벤트·통계: 라벨 저장 → 오경보율, 라벨 필터, CSV 다운로드(BOM·머리글)', async () => {
+      const falseAlarmId = need(state.voiceClearedEventId, '음성으로 해제한 이벤트');
+      await admin.click('#tab-events');
+      const row = (eventId) => `#event-table tr[data-event-id="${eventId}"]`;
+      await admin.waitForSelector(row(falseAlarmId));
+      check((await admin.$$('#day-chart svg rect[data-series]')).length > 0, '하루별 막대 그래프에 막대가 없음');
+
+      // 오경보 하나, 연출 낙상 하나 → 오경보율 50%
+      await admin.selectOption(`${row(falseAlarmId)} .label-select`, 'false_alarm');
+      await admin.fill(`${row(falseAlarmId)} .note-input`, '소파에 털썩 앉음');
+      await admin.click(`${row(falseAlarmId)} .save-label`);
+      await admin.waitForSelector(`${row(falseAlarmId)} .label-edit[data-saved="false_alarm"]`);
+      const helpRow = '#event-table tr[data-result="ALERT_HELP"]';
+      const helpId = need(await admin.getAttribute(helpRow, 'data-event-id'), '도움 요청 이벤트');
+      await admin.selectOption(`${row(helpId)} .label-select`, 'staged_fall');
+      await admin.click(`${row(helpId)} .save-label`);
+      await admin.waitForSelector(`${row(helpId)} .label-edit[data-saved="staged_fall"]`);
+      await waitText(admin, '#stat-false-alarm .value', /^50%$/);
+      const stats = (await adminRequest('GET', '/admin/api/stats?days=14')).json;
+      check(stats.labels.false_alarm_rate === 0.5 && stats.labels.labeled === 2, `통계 API의 라벨 값이 다름: ${JSON.stringify(stats.labels)}`);
+
+      // 라벨 필터 → 오경보 하나만
+      await admin.selectOption('#f-label', 'false_alarm');
+      await admin.waitForFunction((id) => {
+        const rows = document.querySelectorAll('#event-table tbody tr');
+        return rows.length === 1 && rows[0].dataset.eventId === String(id);
+      }, falseAlarmId);
+
+      // CSV는 지금 필터 그대로 내려받는다
+      const [download] = await Promise.all([admin.waitForEvent('download'), admin.click('#csv-link')]);
+      check(/^events-\d{8}-\d{4}\.csv$/.test(download.suggestedFilename()), `CSV 파일 이름이 다름: ${download.suggestedFilename()}`);
+      const bytes = fs.readFileSync(await download.path());
+      check(bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf, 'CSV가 UTF-8 BOM으로 시작하지 않음');
+      const lines = bytes.toString('utf8').replace(/^﻿/, '').trim().split(/\r?\n/);
+      check(lines[0].startsWith('이벤트 번호,시작 시각') && lines[0].includes('검토 라벨'), `CSV 머리글이 다름: ${lines[0]}`);
+      check(lines.length === 2 && lines[1].startsWith(`${falseAlarmId},`) && lines[1].includes('false_alarm') && lines[1].includes('소파에 털썩 앉음'),
+        `CSV 내용이 다름: ${lines.slice(1).join(' / ')}`);
+
+      // 새로 고쳐도 저장한 라벨·메모가 남아 있다
+      await admin.reload();
+      await admin.waitForSelector(row(falseAlarmId));
+      check(await admin.inputValue(`${row(falseAlarmId)} .label-select`) === 'false_alarm', '새로 고친 뒤 라벨이 사라짐');
+      check(await admin.inputValue(`${row(falseAlarmId)} .note-input`) === '소파에 털썩 앉음', '새로 고친 뒤 메모가 사라짐');
+    });
+
+    await scenario('관리자 사용자 삭제: 이메일을 정확히 적어야 삭제 → 그 계정으로 로그인 불가', async () => {
+      const other = need(await adminUserByEmail(OTHER.email), '이웃 사용자');
+      await admin.click('#tab-users');
+      await admin.fill('#user-search', OTHER.email);
+      await admin.waitForSelector(`#user-table tr[data-user-id="${other.id}"]`);
+      await admin.click(`#user-table tr[data-user-id="${other.id}"]`);
+      await admin.waitForSelector('#user-detail [data-action="delete"]');
+      await admin.click('#user-detail [data-action="delete"]');
+      await admin.waitForSelector('#delete-dialog[open]');
+      await admin.fill('#delete-email', WARD.email);   // 다른 사람 이메일
+      check(await admin.isDisabled('#delete-confirm'), '이메일이 다른데 삭제 버튼이 켜짐');
+      await admin.fill('#delete-email', `  ${OTHER.email.toUpperCase()} `);   // 대소문자·공백은 상관없다
+      check(await admin.isEnabled('#delete-confirm'), '이메일을 맞게 적었는데 삭제 버튼이 꺼져 있음');
+      await admin.click('#delete-confirm');
+      await admin.waitForSelector('#delete-dialog', { state: 'hidden' });
+      await admin.waitForSelector(`#user-table tr[data-user-id="${other.id}"]`, { state: 'detached' });
+      check(!(await adminUserByEmail(OTHER.email)), '삭제한 사용자가 목록에 남아 있음');
+
+      const page = watchPage(await ctxOther.newPage(), 'deleted-login');
+      await loginUI(page, OTHER);
+      await page.waitForSelector('#error:not(.hidden)');
+      check(page.url().includes('/login'), '삭제한 계정으로 로그인됨');
+      await page.close();
+    });
+
+    await ctxAdmin.close();
 
     await scenario('페이지 JS 오류 없음', async () => {
       check(consoleErrors.length === 0, `콘솔 오류 ${consoleErrors.length}건:\n    ${consoleErrors.join('\n    ')}`);

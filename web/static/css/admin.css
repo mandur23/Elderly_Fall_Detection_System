@@ -1,0 +1,293 @@
+/*
+ * 관리자 페이지(/admin) 전용 스타일. 공통 모양(버튼, 카드, 배지, 입력칸)은 style.css를 그대로 쓴다.
+ *
+ * 서버 PC 화면(넓은 데스크톱)에서 보는 운영 화면이라 휴대폰 화면보다 글자·버튼을 작게 하고 표를 넓게 쓴다.
+ * 폭 1024px에서도 쓸 수 있게, 두 칸 배치는 좁아지면 한 칸으로 내려가고 넓은 표는 가로로 스크롤한다.
+ */
+
+:root {
+  --font: 16px;
+  --touch: 40px;
+
+  /* 하루별 막대의 계열 색(해제·경보·기타). 기타는 '나머지'라서 회색으로 둔다. */
+  --series-cleared: #2a78d6;
+  --series-alert: #eb6834;
+  --series-other: #8b8f97;
+  --grid: #e3e7ec;
+}
+
+/* --- 머리글과 탭 --------------------------------------------------------- */
+
+.admin-header {
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+}
+
+.admin-header .bar,
+.admin-header .tabs,
+.admin-main {
+  max-width: 1360px;
+  margin: 0 auto;
+  padding-left: 20px;
+  padding-right: 20px;
+}
+
+.admin-header .bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 16px;
+  padding-top: 14px;
+}
+.admin-header h1 { font-size: 1.4rem; margin: 0; }
+.admin-header .bar p { margin: 0; }
+
+.tabs {
+  display: flex;
+  gap: 4px;
+  padding-top: 10px;
+}
+
+.tabs button {
+  font: inherit;
+  font-weight: 700;
+  padding: 10px 18px;
+  border: 1px solid transparent;
+  border-bottom: 0;
+  border-radius: 10px 10px 0 0;
+  background: transparent;
+  color: var(--primary);
+  cursor: pointer;
+}
+.tabs button:hover { background: #e8eefb; }
+.tabs button[aria-selected="true"] {
+  background: var(--bg);
+  border-color: var(--border);
+  color: var(--text);
+  margin-bottom: -1px;   /* 아래 경계선을 덮어 본문과 이어 보이게 */
+}
+.tabs button:focus-visible { outline: 3px solid #f59e0b; outline-offset: -3px; }
+
+.admin-main {
+  max-width: 1360px;
+  padding-top: 18px;
+  padding-bottom: 48px;
+}
+
+.admin-main h2 { font-size: 1.15rem; }
+.admin-main h3 { font-size: 1rem; margin: 12px 0 8px; }
+
+.card-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; }
+.card-head h2 { margin-bottom: 8px; }
+
+/* --- 배치 ----------------------------------------------------------------- */
+
+.cols {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--gap);
+  align-items: start;
+}
+.cols-users { grid-template-columns: minmax(0, 1fr) 440px; }
+.cols-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+
+@media (max-width: 1100px) {
+  .cols, .cols-users { grid-template-columns: minmax(0, 1fr); }
+}
+@media (max-width: 800px) {
+  .cols-3 { grid-template-columns: minmax(0, 1fr); }
+}
+
+.refresh-line { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; min-height: 28px; }
+.refresh-line .form-error { padding: 4px 10px; }
+
+/* 검색창·필터 한 줄 */
+.toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 10px 14px;
+  margin-bottom: var(--gap);
+}
+.toolbar label { display: grid; gap: 4px; font-weight: 700; font-size: 0.9rem; }
+.toolbar input[type="text"] { width: 320px; max-width: 100%; }
+#f-user { max-width: 280px; }
+.toolbar select,
+.toolbar input[type="date"] {
+  width: auto;
+  min-height: var(--touch);
+  padding: 6px 10px;
+  font: inherit;
+  border: 2px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+  color: var(--text);
+}
+
+.btn-small { min-height: var(--touch); padding: 6px 14px; font-size: 0.95rem; }
+
+/* --- 숫자 칸(타일) --------------------------------------------------------- */
+
+.tiles {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(170px, 1fr));
+  gap: 12px;
+  margin-bottom: var(--gap);
+}
+
+.tile {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 12px 14px;
+}
+.tile .label { font-size: 0.9rem; color: var(--muted); font-weight: 600; }
+.tile .value { font-size: 1.7rem; font-weight: 800; line-height: 1.2; font-variant-numeric: tabular-nums; }
+.tile .sub { font-size: 0.85rem; color: var(--muted); }
+.tile.is-alert { border-color: var(--alarm); border-width: 2px; }
+
+/* --- 이름·값 목록 ---------------------------------------------------------- */
+
+.kv {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 6px 16px;
+  margin: 0;
+}
+.kv dt { color: var(--muted); font-weight: 600; }
+.kv dd { margin: 0; font-variant-numeric: tabular-nums; }
+
+/* --- 표 ------------------------------------------------------------------- */
+
+.table-wrap { overflow-x: auto; }
+
+table.data {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.92rem;
+}
+table.data th,
+table.data td {
+  text-align: left;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+}
+table.data th { font-weight: 700; color: var(--muted); white-space: nowrap; background: #f8f9fb; }
+table.data td.num { font-variant-numeric: tabular-nums; white-space: nowrap; }
+table.data td.nowrap { white-space: nowrap; }
+table.data tbody tr:hover { background: #f5f8ff; }
+table.data tr.is-selected { background: #e8eefb; }
+table.data .empty-row td { color: var(--muted); text-align: center; padding: 16px; }
+
+/* 표 안의 작은 배지 */
+table.data .badge,
+.mini .badge { min-height: 24px; padding: 2px 10px; font-size: 0.85rem; }
+
+/* 표의 이름 칸 버튼: 줄 전체를 눌러도 되지만, 키보드로도 고를 수 있게 버튼을 둔다 */
+.link-btn {
+  font: inherit;
+  font-weight: 700;
+  color: var(--primary);
+  background: none;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+  text-align: left;
+  text-decoration: underline;
+}
+
+.badge-disabled { background: var(--danger); color: #fff; }
+.badge-active { background: var(--normal); color: #fff; }
+.badge-ended { background: #e5e7eb; color: var(--text); }
+
+/* 이벤트 표: 글이 긴 칸이 너무 좁아져 한 글자씩 줄바꿈되지 않게 최소 폭을 둔다(넘치면 표 안에서 가로 스크롤) */
+#event-table .col-who { min-width: 8em; }
+#event-table .col-result { min-width: 10em; }
+#event-table .col-label { min-width: 14em; }
+#user-table .link-btn { min-width: 4em; }
+
+/* 라벨·메모 입력: 윗줄에 라벨과 저장 버튼, 아랫줄에 메모 */
+.label-edit {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  grid-template-areas: "label save" "note note";
+  gap: 6px;
+  align-items: center;
+}
+.label-edit .label-select { grid-area: label; }
+.label-edit .note-input { grid-area: note; }
+.label-edit .save-label { grid-area: save; }
+.label-edit select,
+.label-edit input {
+  min-height: 34px;
+  padding: 4px 8px;
+  font: inherit;
+  font-size: 0.9rem;
+  border: 2px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+}
+.label-edit select,
+.label-edit input { width: 100%; }
+.label-edit .btn { min-height: 34px; padding: 2px 12px; font-size: 0.9rem; }
+.label-edit.is-dirty select,
+.label-edit.is-dirty input { border-color: var(--highlight-border); }
+
+/* --- 사용자 정보 칸 ----------------------------------------------------------- */
+
+#user-detail .who { font-size: 1.2rem; font-weight: 800; }
+#user-detail .mini { list-style: none; margin: 0 0 8px; padding: 0; font-size: 0.92rem; }
+#user-detail .mini li { padding: 6px 0; border-bottom: 1px solid var(--border); display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: center; }
+#user-detail .mini li:last-child { border-bottom: 0; }
+
+/* --- 진행 중인 이벤트 ---------------------------------------------------------- */
+
+.active-list { list-style: none; margin: 0; padding: 0; }
+.active-list li {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  align-items: center;
+  padding: 8px 10px;
+  border-left: 6px solid var(--alarm);
+  background: #fdecea;
+  border-radius: 8px;
+  margin-bottom: 8px;
+}
+.active-list li[data-state="SUSPECT"] { border-left-color: var(--suspect); background: #fff6d6; }
+
+/* --- 그래프 --------------------------------------------------------------- */
+
+.chart-block { margin-bottom: 8px; }
+.chart { width: 100%; overflow-x: auto; }
+.chart svg { display: block; width: 100%; height: auto; min-width: 560px; }
+.chart .axis-text { font-size: 11px; fill: var(--muted); }
+.chart .value-text { font-size: 11px; fill: var(--text); font-weight: 700; }
+.chart .gridline { stroke: var(--grid); stroke-width: 1; }
+.chart .bar-hit { fill: transparent; }
+.chart .bar-group:hover .bar-hit { fill: rgba(11, 87, 208, 0.06); }
+
+.legend { display: flex; flex-wrap: wrap; gap: 4px 16px; font-size: 0.9rem; margin-bottom: 6px; }
+.legend span { display: inline-flex; align-items: center; gap: 6px; }
+.swatch { display: inline-block; width: 12px; height: 12px; border-radius: 3px; }
+
+/* 가로 막대 목록 (판정별·음성 결과·라벨) */
+.hbars { display: grid; gap: 6px; font-size: 0.9rem; }
+.hbar { display: grid; grid-template-columns: 9.5em 1fr 3.5em; gap: 8px; align-items: center; }
+.hbar .name { color: var(--text); }
+.hbar .track { height: 12px; background: var(--grid); border-radius: 4px; overflow: hidden; }
+.hbar .fill { height: 100%; border-radius: 4px; background: var(--series-cleared); min-width: 0; }
+.hbar .count { text-align: right; font-variant-numeric: tabular-nums; font-weight: 700; }
+
+/* --- 삭제 확인 창 ------------------------------------------------------------ */
+
+dialog {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 20px;
+  max-width: 520px;
+  width: calc(100% - 32px);
+}
+dialog::backdrop { background: rgba(0, 0, 0, 0.45); }
+dialog input[type="text"] { min-height: var(--touch); }

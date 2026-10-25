@@ -44,6 +44,7 @@ flowchart LR
 | 웹 - 보호자 화면 (`/guardian`) | 내가 보호하는 사용자의 현재 상태, 경보, 이벤트 기록. 경보 시 소리·진동 | WebSocket, Vibration API |
 | 웹 - 푸시 알림 | 브라우저를 닫아도 보호자 휴대폰에 경보 알림 표시 | 서비스 워커, Push API, VAPID |
 | 웹 - 현장 화면 (`/kiosk`) | Pi 디스플레이에서 상태 표시와 '괜찮아요' 버튼 | HTML·JavaScript (Chromium 키오스크) |
+| 웹 - 관리자 (`/admin`) | 운영팀용. 전체 현황(서버·기기·진행 중 이벤트·알림 실패), 사용자 관리(정지·해제·삭제), 전체 이벤트 기록·검토 라벨·통계·CSV 내보내기. 서버 PC에서만 열림 | HTML·JavaScript, SVG 그래프(라이브러리 없음) |
 
 ## 계정과 권한
 
@@ -55,6 +56,17 @@ flowchart LR
 | 보호자 등록 | 사용자가 보호자의 이메일을 입력 → 보호자의 마이페이지에 요청이 보임 → 보호자가 수락하면 연결. 본인 동의 없이 남의 경보를 받지 않게 하기 위함 |
 | 기기 | 사용자 계정에 속함. 휴대폰은 로그인한 채 카메라 감지 화면을 열면 그 계정의 기기로 등록. Pi는 마이페이지에서 발급한 기기 키로 접속 |
 | 권한 | 사용자는 자기 기기와 이벤트만, 보호자는 연결된 사용자의 상태와 이벤트만 볼 수 있음. 경보 해제는 사용자 본인(현장 화면 포함)과 연결된 보호자만 가능 |
+
+### 관리자
+
+시스템을 운영하는 팀이 관리자입니다. 관리자 계정은 만들지 않고, 관리자 페이지(`/admin`)와 관리자 API(`/admin/api/...`)는 **서버 PC 자신에서 연 요청만** 받습니다(`server/admin.py`).
+
+- 접속 주소가 루프백(127.0.0.1, ::1)이어야 하고, `Host` 머리글도 `localhost`·`127.0.0.1`·`[::1]`이어야 합니다(DNS 리바인딩 차단).
+- 상태를 바꾸는 요청은 같은 출처의 `Origin`과 `X-Admin-Request: 1` 머리글이 있어야 합니다(서버 PC 브라우저를 이용한 CSRF 차단).
+- 맞지 않으면 404로 답해 같은 Wi-Fi의 다른 기기에는 관리자 페이지가 있다는 것도 알리지 않습니다. `FALL_ADMIN=0`이면 아예 끕니다.
+- 관리자 동작은 사용자 세션과 상관없고, 상태를 바꾼 동작은 서버 로그에 남깁니다.
+
+관리자가 계정을 정지하면 그 사용자는 로그인할 수 없고, 기존 세션·열린 보호자 화면·그 사용자 기기의 카메라 연결이 끊기며 기기의 새 접속도 거부됩니다. 사용 방법은 [server/README.md](../server/README.md#관리자-페이지)에 있습니다.
 
 비밀번호는 해시(bcrypt 또는 argon2)로만 저장합니다. 로그인은 서버 세션과 HttpOnly·Secure 쿠키로 유지합니다. 이메일 인증과 비밀번호 찾기는 이번 범위에 넣지 않습니다.
 
@@ -87,6 +99,7 @@ flowchart LR
 | `GET /camera` | 휴대폰 카메라 감지 (로그인 필요) |
 | `GET /guardian` | 보호자 화면 (로그인 필요) |
 | `GET /kiosk` | Pi 현장 화면 (기기 키로 접속) |
+| `GET /admin` | 관리자 페이지 (서버 PC에서만, 아래 '관리자' 참고) |
 
 API
 
@@ -111,11 +124,11 @@ API
 
 | 테이블 | 주요 항목 |
 | --- | --- |
-| `users` | id, email, password_hash, name, created_at |
+| `users` | id, email, password_hash, name, created_at, disabled_at(관리자가 정지한 시각) |
 | `guardians` | user_id(사용자), guardian_id(보호자), status(요청·수락), created_at |
 | `devices` | id, owner_id, name, kind(pi·phone), key_hash(Pi), last_seen_at |
 | `push_subscriptions` | user_id, endpoint, p256dh, auth, created_at |
-| `events` | id, device_id, started_at, ended_at, result, voice_result, feature_snapshot, cleared_by |
+| `events` | id, device_id, started_at, alarm_at, ended_at, result, voice_result, feature_snapshot, cleared_by, review_label·review_note(관리자 페이지의 시험 검토 라벨·메모) |
 | `notifications` | event_id, guardian_id, channel(websocket·push), state(전송·실패), sent_at |
 
 ## 장애 처리

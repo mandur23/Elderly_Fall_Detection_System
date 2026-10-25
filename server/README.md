@@ -98,6 +98,8 @@ python -m pytest server/tests -q
 
 ## 웹·Pi 클라이언트가 알아야 할 것
 
+Pi 클라이언트는 별도 저장소 [elderly_fall_detection_pi_client](https://github.com/mandur23/elderly_fall_detection_pi_client)에 있습니다.
+
 - **웹페이지 위치:** `web/index.html`, `login.html`, `signup.html`, `mypage.html`, `camera.html`, `guardian.html`, `kiosk.html`, 서비스 워커는 `web/sw.js`, 그 밖의 파일은 `web/static/`에 두면 서버가 자동으로 제공합니다. `mypage`, `camera`, `guardian`은 로그인하지 않으면 로그인 화면으로 보냅니다.
 - **카메라 연결:** `wss://<서버>/ws/camera?device_id=N` (휴대폰은 로그인 쿠키, Pi는 `&key=<기기 키>` 또는 `X-Device-Key` 헤더). 바이너리 메시지 1개 = JPEG 1장.
   - 서버가 보내는 메시지: `{"type":"hello",...}`, `{"type":"state","state":"NORMAL|SUSPECT|ALARM"}`, `{"type":"voice_check","event_id":N,"attempt":n}`

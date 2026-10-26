@@ -5,3 +5,5 @@ venv/
 .idea/
 data/
 *.pt
+# run_server.bat이 내려받는 mkcert
+tools/

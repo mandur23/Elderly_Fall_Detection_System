@@ -1,11 +1,13 @@
 """중앙 서버 통합 실행 파일 (서버 + 웹 + 관리자 화면).
 
+    run_server.bat                    # Windows: 더블클릭하면 환경 설정부터 실행까지 자동 (= --auto)
     python run_server.py              # 실제 모델(YOLO-Pose, Whisper)로 실행
     python run_server.py --fake       # 장비·모델 없이 가짜 자세 추정·가짜 음성 인식으로 실행
-    python run_server.py --make-cert  # 휴대폰용 HTTPS 인증서를 만든 뒤 실행 (mkcert 필요)
+    python run_server.py --make-cert  # 휴대폰용 HTTPS 인증서를 다시 만든 뒤 실행 (mkcert 필요)
 
 실행하면 다음을 알아서 한다.
-1. 필요한 패키지가 있는지 확인한다(없으면 설치 명령을 알려 주고 멈춘다).
+1. 필요한 패키지가 있는지 확인한다. --auto면 가상환경에 설치하고, mkcert·인증서·방화벽까지
+   준비한다(auto_setup.py). 아니면 설치 명령을 알려 주고 멈춘다.
 2. data/cert.pem, data/key.pem이 있으면 HTTPS로 켠다. 휴대폰 카메라·마이크·웹 푸시는 HTTPS에서만 된다.
 3. 웹 푸시 키(VAPID)가 없으면 data/에 한 번 만들어 두고 계속 쓴다.
 4. 휴대폰과 Pi가 접속할 주소를 화면에 보여 준다.
@@ -18,18 +20,17 @@
 import argparse
 import base64
 import importlib.util
-import ipaddress
 import os
-import shutil
 import socket
 import ssl
-import subprocess
 import sys
 import threading
 import time
 import urllib.request
 import webbrowser
 from pathlib import Path
+
+import auto_setup
 
 ROOT = Path(__file__).resolve().parent
 
@@ -66,32 +67,6 @@ def check_packages(fake: bool) -> bool:
     if not fake and set(missing) & set(MODELS.values()):
         say("모델 없이 화면만 시험하려면:  python run_server.py --fake")
     return False
-
-
-def make_cert(data_dir: Path, ip: str) -> bool:
-    """mkcert로 localhost와 이 PC의 Wi-Fi 주소용 인증서를 만들고, 휴대폰에 설치할 rootCA.pem을 복사해 둔다."""
-    mkcert = shutil.which("mkcert")
-    if mkcert is None:
-        say("mkcert가 없습니다. https://github.com/FiloSottile/mkcert 에서 설치한 뒤 다시 실행하세요.")
-        return False
-    subprocess.run([mkcert, "-install"], check=True)
-    subprocess.run([mkcert, "-cert-file", str(data_dir / "cert.pem"), "-key-file", str(data_dir / "key.pem"),
-                    "localhost", "127.0.0.1", "::1", ip], check=True)
-    caroot = subprocess.run([mkcert, "-CAROOT"], check=True, capture_output=True, text=True).stdout.strip()
-    shutil.copy(Path(caroot) / "rootCA.pem", data_dir / "rootCA.pem")
-    say(f"인증서를 만들었습니다. 휴대폰과 Pi에는 {data_dir / 'rootCA.pem'} 을 설치하세요 (docs/PHONE_ACCESS.md).")
-    return True
-
-
-def cert_covers(cert_path: Path, ip: str) -> bool:
-    """인증서가 지금 Wi-Fi 주소를 포함하는지. 공유기에서 주소가 바뀌면 휴대폰에 인증서 경고가 뜬다."""
-    try:
-        from cryptography import x509
-        cert = x509.load_pem_x509_certificate(cert_path.read_bytes())
-        names = cert.extensions.get_extension_for_class(x509.SubjectAlternativeName).value
-        return ipaddress.ip_address(ip) in names.get_values_for_type(x509.IPAddress)
-    except Exception:
-        return True  # 확인할 수 없으면 경고하지 않는다
 
 
 def ensure_vapid_keys(data_dir: Path) -> None:
@@ -133,7 +108,9 @@ def open_admin_when_ready(url: str, timeout: float = 120.0) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description="낙상 감지 중앙 서버 통합 실행")
     parser.add_argument("--fake", action="store_true", help="모델 없이 가짜 자세 추정·가짜 음성 인식으로 실행(시험용)")
-    parser.add_argument("--make-cert", action="store_true", help="mkcert로 HTTPS 인증서를 만든 뒤 실행")
+    parser.add_argument("--make-cert", action="store_true", help="mkcert로 HTTPS 인증서를 다시 만든 뒤 실행")
+    parser.add_argument("--auto", action="store_true",
+                        help="패키지 설치, mkcert·인증서, 방화벽까지 자동으로 준비(run_server.bat이 사용)")
     parser.add_argument("--port", type=int, default=int(os.getenv("FALL_PORT", "8443")))
     parser.add_argument("--no-browser", action="store_true", help="관리자 화면을 자동으로 열지 않음")
     args = parser.parse_args()
@@ -142,18 +119,24 @@ def main() -> int:
         say("Python 3.10 이상이 필요합니다.")
         return 1
     os.chdir(ROOT)  # 어디서 실행해도 web/, data/를 찾도록
+    if args.auto and not auto_setup.ensure_packages(args.fake):
+        return 1
     if not check_packages(args.fake):
         return 1
 
     data_dir = Path(os.getenv("FALL_DATA_DIR", ROOT / "data"))
     data_dir.mkdir(parents=True, exist_ok=True)
     ip = lan_ip()
+    if args.auto:
+        if not os.getenv("FALL_SSL_CERT"):
+            auto_setup.ensure_cert(data_dir, ip)
+        auto_setup.ensure_firewall(args.port)
     os.environ["FALL_PORT"] = str(args.port)
     if args.fake:
         os.environ["FALL_POSE_BACKEND"] = "fake"
         os.environ["FALL_STT_BACKEND"] = "fake"
 
-    if args.make_cert and not make_cert(data_dir, ip):
+    if args.make_cert and not auto_setup.make_cert(data_dir, ip):
         return 1
     cert, key = data_dir / "cert.pem", data_dir / "key.pem"
     if not os.getenv("FALL_SSL_CERT") and cert.exists() and key.exists():
@@ -175,8 +158,8 @@ def main() -> int:
     say(f"  Pi 설정     : PI_SERVER_URL={phone_url}")
     if not https:
         say("  ! HTTPS 인증서가 없습니다. 휴대폰 카메라·마이크·웹 푸시가 동작하지 않습니다.")
-        say("    python run_server.py --make-cert 로 인증서를 만드세요 (docs/PHONE_ACCESS.md).")
-    elif ip != "127.0.0.1" and not cert_covers(Path(os.environ["FALL_SSL_CERT"]), ip):
+        say("    run_server.bat(또는 python run_server.py --auto)으로 실행하면 인증서를 자동으로 만듭니다.")
+    elif ip != "127.0.0.1" and not auto_setup.cert_covers(Path(os.environ["FALL_SSL_CERT"]), ip):
         say(f"  ! 인증서에 지금 주소({ip})가 없습니다. 휴대폰에 경고가 뜨면 --make-cert로 다시 만드세요.")
     say("  끄려면 이 창에서 Ctrl+C")
     say("=" * 64)

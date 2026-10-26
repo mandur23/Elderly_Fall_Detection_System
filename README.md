@@ -36,12 +36,9 @@
 
 ### 빠른 실행
 
-```bash
-pip install -r server/requirements.txt
-python run_server.py --make-cert   # 처음 한 번(휴대폰용 HTTPS 인증서). 이후에는 python run_server.py
-```
+**Windows: `run_server.bat` 더블클릭** (macOS·Linux: `./run_server.sh`)
 
-Windows는 `run_server.bat`을 더블클릭해도 됩니다. 서버와 웹이 함께 켜지고, 서버 PC 브라우저에 **관리자 화면**이 열립니다. 화면에 나온 주소로 휴대폰에서 접속합니다([휴대폰에서 웹 접속하기](docs/PHONE_ACCESS.md)). 장비·모델 없이 화면만 보려면 `python run_server.py --fake`.
+처음 실행하면 Python 설치(없을 때), 가상환경과 패키지 설치, HTTPS 인증서 만들기, 방화벽 설정까지 자동으로 한 뒤 서버를 켭니다. 서버와 웹이 함께 켜지고, 서버 PC 브라우저에 **관리자 화면**이 열립니다. 다음부터는 바로 켜집니다. 화면에 나온 주소로 휴대폰에서 접속합니다([휴대폰에서 웹 접속하기](docs/PHONE_ACCESS.md)). 장비·모델 없이 화면만 보려면 `run_server.bat --fake`.
 
 새 구조의 코드는 다음과 같습니다.
 

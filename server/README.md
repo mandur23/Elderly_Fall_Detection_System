@@ -40,15 +40,23 @@ GPU(NVIDIA)가 있으면 [PyTorch 안내](https://pytorch.org/get-started/locall
 
 ### 통합 실행 파일 (권장)
 
-저장소 최상위의 `run_server.py`가 아래 수동 단계를 대신합니다. Windows는 `run_server.bat`, macOS·Linux는 `./run_server.sh`로도 실행할 수 있습니다.
+**Windows는 `run_server.bat` 더블클릭**, macOS·Linux는 `./run_server.sh` 하나로 환경 설정부터 실행까지 끝납니다. 처음 한 번만 설정하고, 다음부터는 이미 된 단계를 건너뛰어 바로 켜집니다.
+
+1. Python 3.10~3.13을 찾고, 없으면 winget으로 Python 3.11을 설치합니다(Windows).
+2. 가상환경 `.venv`를 만들고 `server/requirements.txt`를 설치합니다. NVIDIA GPU가 있으면 GPU용 PyTorch를 먼저 설치합니다. 목록이 바뀌었을 때만 다시 설치합니다.
+3. mkcert가 없으면 설치하고(winget·brew, 안 되면 공식 배포 파일을 `tools/`에 받음), HTTPS 인증서가 없거나 서버 PC의 Wi-Fi 주소가 바뀌었으면 새로 만듭니다. 휴대폰용 `data/rootCA.pem`도 만듭니다.
+4. Windows 방화벽에 서버 포트를 엽니다(관리자 권한이 없으면 처음 실행 때 뜨는 창에서 허용).
+5. 아래처럼 서버를 켜고 관리자 화면을 엽니다.
+
+설정 단계는 `auto_setup.py`에 있습니다. 직접 실행할 때의 옵션:
 
 ```bash
-python run_server.py --make-cert   # 처음 한 번: mkcert로 HTTPS 인증서(data/cert.pem, data/rootCA.pem) 생성
-python run_server.py               # 평소 실행
-python run_server.py --fake        # 모델 없이 시험
+run_server.bat --fake              # 모델 없이 시험 (python run_server.py --auto --fake 와 같음)
+python run_server.py               # 이미 설정된 환경에서 설정 단계 없이 실행
+python run_server.py --make-cert   # 인증서를 강제로 다시 만들기
 ```
 
-- 패키지가 없으면 설치 명령을 알려 주고 멈춥니다.
+- `--auto` 없이 실행했는데 패키지가 없으면 설치 명령을 알려 주고 멈춥니다.
 - `data/cert.pem`, `data/key.pem`이 있으면 HTTPS로 켭니다. 없으면 HTTP로 켜고 이 PC에서만 로그인되게 합니다(`FALL_COOKIE_SECURE=0`).
 - 웹 푸시 키가 없으면 `data/vapid_private.pem`을 한 번 만들어 계속 씁니다.
 - 휴대폰·Pi가 접속할 주소를 화면에 보여 주고, 인증서에 지금 Wi-Fi 주소가 빠져 있으면 경고합니다.

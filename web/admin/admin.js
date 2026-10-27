@@ -2,6 +2,7 @@
 //
 // 탭 세 개
 // - 현황: 서버 정보, 전체 개수, 기기 상태, 진행 중인 이벤트, 최근 알림 실패. 2초마다 새로 받는다.
+//   실시간 영상·낙상 판정: 고른 기기의 최근 장면 위에 관절·몸통·상자를 그리고 특징값과 판정 기준을 나란히 보여 준다(0.2초마다).
 // - 사용자: 검색, 목록, 고른 사용자의 보호자·기기·최근 이벤트, 계정 정지·해제, 삭제(이메일을 다시 적어야 함)
 // - 이벤트·통계: 필터, 이벤트 표(검토 라벨·메모 저장), CSV 다운로드, 통계(하루별 막대 그래프 등)
 //
@@ -158,7 +159,13 @@ function selectTab(name) {
   }
   if (location.hash !== '#' + name) history.replaceState(null, '', '#' + name);
 
-  if (name === 'overview') startOverview(); else stopOverview();
+  if (name === 'overview') {
+    startOverview();
+    startLive();
+  } else {
+    stopOverview();
+    stopLive();
+  }
   if (name === 'users') loadUsers().catch(showLoadError('사용자 목록'));
   if (name === 'events') {
     loadUserOptions().catch(showLoadError('사용자 목록'));
@@ -273,9 +280,16 @@ function renderActiveEvents(events) {
 }
 
 function renderDevices(devices) {
+  updateLiveOptions(devices);
+  const nameCell = (d) => {
+    if (!d.online) return td(d.name);
+    const button = el('button', { type: 'button', class: 'link-btn', text: d.name, title: '실시간 영상 보기' });
+    button.addEventListener('click', () => selectLiveDevice(d.device_id));
+    return el('td', {}, [button]);
+  };
   const rows = devices.map((d) => el('tr', { 'data-device-id': d.device_id, 'data-online': d.online ? '1' : '0' }, [
     td(d.device_id, 'num'),
-    td(d.name),
+    nameCell(d),
     td(DEVICE_KIND_LABELS[d.kind] || d.kind),
     td(d.owner_name ? `${d.owner_name} (${d.owner_id})` : d.owner_id),
     el('td', {}, [stateBadge(d.state, { online: d.online })]),
@@ -304,6 +318,319 @@ function renderFailures(failures) {
     td(f.detail),
   ]));
   fillTable($('#failure-table'), rows, '최근 알림 실패가 없습니다.');
+}
+
+// ---------------------------------------------------------------- 실시간 영상·낙상 판정
+
+// 기기는 1초에 10장을 보내지만 눈으로 보기에는 1초에 5번이면 충분하다. 서버 PC 안에서만 오가는 요청이다.
+const LIVE_INTERVAL_MS = 200;
+const LIVE_HISTORY_SECONDS = 15;
+// 감지 상태: FSM 상태(server/detection/fsm.py)와 이벤트 상태. 기기 표의 배지(ui.js)는 FALLING을 모르므로 따로 둔다.
+const FSM_LABELS = {
+  NORMAL: '정상 감시 중',
+  FALLING: '하강 감지 (누운 자세 확인 중)',
+  SUSPECT: '낙상 의심 (음성 확인 중)',
+  ALARM: '경보',
+};
+const FSM_CLASSES = { NORMAL: 'badge-normal', FALLING: 'badge-falling', SUSPECT: 'badge-suspect', ALARM: 'badge-alarm' };
+const OVERLAY_COLORS = { NORMAL: '#2ecc71', FALLING: '#ff9800', SUSPECT: '#ffd600', ALARM: '#ff1744' };
+const POSTURE_LABELS = { lying: '누움', standing: '서 있음', between: '중간 (서지도 눕지도 않음)' };
+// 최근 15초 그래프: 특징값과 그 판정 기준선
+const LIVE_CHARTS = [
+  { key: 'descent_velocity', label: '하강 속도 (몸통 길이/초)', min: -1,
+    lines: (t) => [{ v: t.descent_velocity_peak, name: '하강' }] },
+  { key: 'torso_angle', label: '몸통 각도 (°)', min: 0, max: 90,
+    lines: (t) => [{ v: t.torso_angle_lying, name: '누움' }, { v: t.torso_angle_standing, name: '서 있음' }] },
+  { key: 'aspect_ratio', label: '종횡비 (가로/세로)', min: 0,
+    lines: (t) => [{ v: t.aspect_ratio_lying, name: '누움' }, { v: t.aspect_ratio_standing, name: '서 있음' }] },
+];
+
+let liveDeviceId = null;
+let liveSeq = 0;            // 마지막으로 받은 장면 번호. 같으면 서버가 204(새 장면 없음)로 답한다
+let liveTimer = null;
+let liveBusy = false;
+let liveOptionsKey = '';    // 기기 고르기 목록을 다시 만들지 판단하는 값
+let liveReceived = null;    // 마지막으로 받은 응답과 받은 시각 { data, at }
+
+function fsmBadge(state) {
+  return el('span', { class: `badge ${FSM_CLASSES[state] || 'badge-offline'}`, text: FSM_LABELS[state] || state || '-' });
+}
+
+function setupLive() {
+  const select = $('#live-device');
+  select.addEventListener('change', () => selectLiveDevice(select.value ? Number(select.value) : null));
+  $('#live-pause').addEventListener('change', (e) => { if (!e.target.checked) refreshLive(); });
+}
+
+// 기기 표(2초마다 새로 받음)의 기기들로 고르기 목록을 채운다. 고르는 도중에 목록이 바뀌지 않게 내용이 같으면 두지 않는다.
+function updateLiveOptions(devices) {
+  const key = JSON.stringify(devices.map((d) => [d.device_id, d.name, d.owner_name, d.online]));
+  if (key === liveOptionsKey) return;
+  liveOptionsKey = key;
+  const select = $('#live-device');
+  select.replaceChildren(
+    el('option', { value: '', text: '기기를 고르세요' }),
+    ...devices.map((d) => el('option', {
+      value: d.device_id,
+      text: `#${d.device_id} ${d.name} (${d.owner_name || '-'})${d.online ? '' : ' - 끊김'}`,
+    })),
+  );
+  select.value = liveDeviceId === null ? '' : String(liveDeviceId);
+  if (liveDeviceId !== null && select.value === '') selectLiveDevice(null);   // 고른 기기가 지워졌다
+}
+
+function selectLiveDevice(deviceId) {
+  liveDeviceId = deviceId;
+  liveSeq = 0;
+  liveReceived = null;
+  $('#live-device').value = deviceId === null ? '' : String(deviceId);
+  $('#live-pause').checked = false;
+  clearLive(deviceId === null ? '위에서 기기를 고르세요.' : '장면을 기다리는 중…');
+  if (deviceId !== null) refreshLive();
+}
+
+function clearLive(message) {
+  const empty = $('#live-empty');
+  empty.textContent = message;
+  show(empty);
+  $('#live-info').textContent = '';
+  $('#live-state').replaceChildren();
+  fillTable($('#live-features'), [], '-');
+  $('#live-charts').replaceChildren();
+}
+
+function startLive() {
+  stopLive();
+  liveTimer = setInterval(() => {
+    if (!document.hidden) refreshLive();
+  }, LIVE_INTERVAL_MS);
+}
+
+function stopLive() {
+  clearInterval(liveTimer);
+  liveTimer = null;
+}
+
+async function refreshLive() {
+  if (liveDeviceId === null || liveBusy || $('#live-pause').checked) return;
+  liveBusy = true;
+  const deviceId = liveDeviceId;
+  try {
+    const data = await adminApi(`/admin/api/devices/${deviceId}/live?after=${liveSeq}`);
+    if (deviceId !== liveDeviceId) return;   // 기다리는 사이 다른 기기를 골랐다
+    hide('#live-error');
+    if (data === null) {                      // 204: 새 장면 없음. 장면 나이만 올린다
+      renderLiveInfo();
+      return;
+    }
+    if (!data.online) {
+      liveSeq = 0;
+      clearLive('기기가 접속해 있지 않습니다.');
+      return;
+    }
+    if (!data.frame) {
+      clearLive('기기가 아직 장면을 보내지 않았습니다.');
+      return;
+    }
+    liveSeq = data.seq;
+    liveReceived = { data, at: Date.now() };
+    await drawLive(data);
+    renderLiveSide(data);
+    renderLiveInfo();
+  } catch (err) {
+    const box = $('#live-error');
+    box.textContent = '실시간 장면을 받지 못했습니다. ' + errorText(err);
+    show(box);
+  } finally {
+    liveBusy = false;
+  }
+}
+
+function renderLiveInfo() {
+  if (!liveReceived) return;
+  const { data, at } = liveReceived;
+  const age = data.frame_age + (Date.now() - at) / 1000;
+  const stale = age > data.thresholds.camera_stale_seconds;
+  $('#live-info').textContent = `장면 #${data.seq} · ${age.toFixed(1)}초 전 · ${Number(data.fps).toFixed(1)} FPS`
+    + (stale ? ' · 카메라 응답 없음' : '');
+}
+
+function loadImage(src) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = () => reject(new Error('image'));
+    img.src = src;
+  });
+}
+
+async function drawLive(data) {
+  const canvas = $('#live-canvas');
+  const ctx = canvas.getContext('2d');
+  let img = null;
+  if (String(data.frame_mime).startsWith('image/')) {
+    try { img = await loadImage(`data:${data.frame_mime};base64,${data.frame}`); } catch { img = null; }
+  }
+  if (img) {
+    if (canvas.width !== img.naturalWidth || canvas.height !== img.naturalHeight) {
+      canvas.width = img.naturalWidth;
+      canvas.height = img.naturalHeight;
+    }
+    ctx.drawImage(img, 0, 0);
+  } else {
+    // 시험용 가짜 추정기의 프레임은 그림이 아니다. 관절만 그린다.
+    ctx.fillStyle = '#1f2630';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    drawLabel(ctx, '영상 없음 (시험용 가짜 프레임)', 8, 8, 1);
+  }
+  drawOverlay(ctx, data);
+  hide('#live-empty');
+}
+
+// 읽기 쉽게 어두운 바탕을 깔고 글자를 쓴다. s는 해상도에 따른 배율.
+function drawLabel(ctx, text, x, y, s) {
+  ctx.font = `${Math.round(14 * s)}px sans-serif`;
+  ctx.textBaseline = 'top';
+  const width = ctx.measureText(text).width;
+  ctx.fillStyle = 'rgba(0, 0, 0, 0.65)';
+  ctx.fillRect(x, y, width + 10 * s, 20 * s);
+  ctx.fillStyle = '#fff';
+  ctx.fillText(text, x + 5 * s, y + 3 * s);
+}
+
+function drawOverlay(ctx, data) {
+  const s = Math.max(1, ctx.canvas.width / 640);   // 해상도에 맞춰 선·글자 크기를 키운다
+  const kp = data.keypoints;
+  const color = OVERLAY_COLORS[data.state] || '#9e9e9e';
+  if (!kp) {
+    drawLabel(ctx, '사람 없음', 8, ctx.canvas.height - 28 * s, s);
+    return;
+  }
+  const [x0, y0, x1, y1] = kp.bbox;
+  ctx.lineWidth = 2 * s;
+  ctx.strokeStyle = color;
+  ctx.strokeRect(x0, y0, x1 - x0, y1 - y0);
+  // 관절 점
+  ctx.fillStyle = '#4dd0e1';
+  for (const [x, y] of kp.points) {
+    ctx.beginPath();
+    ctx.arc(x, y, 3 * s, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  // 몸통 선(어깨 중심 -> 엉덩이 중심)과 판정에 쓰는 어깨·엉덩이 네 점
+  const mid = (a, b) => [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2];
+  const sc = mid(...kp.shoulders);
+  const hc = mid(...kp.hips);
+  ctx.strokeStyle = '#ff7043';
+  ctx.lineWidth = 3 * s;
+  ctx.beginPath();
+  ctx.moveTo(sc[0], sc[1]);
+  ctx.lineTo(hc[0], hc[1]);
+  ctx.stroke();
+  ctx.fillStyle = '#ffeb3b';
+  for (const [x, y] of [...kp.shoulders, ...kp.hips]) {
+    ctx.beginPath();
+    ctx.arc(x, y, 4.5 * s, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  const f = data.features || {};
+  const text = `${FSM_LABELS[data.state] || data.state} · 각도 ${f.torso_angle}° · 종횡비 ${f.aspect_ratio} · 하강 ${f.descent_velocity}`;
+  drawLabel(ctx, text, x0, Math.max(0, y0 - 22 * s), s);
+}
+
+function renderLiveSide(data) {
+  const f = data.features;
+  const t = data.thresholds;
+  const fsm = data.fsm;
+  const num = (v, unit = '') => (v === null || v === undefined ? '-' : `${v}${unit}`);
+  const rows = [
+    ['사람', data.person_detected ? `감지 (신뢰도 ${data.keypoints ? data.keypoints.confidence : '-'})` : '없음'],
+    ['자세', POSTURE_LABELS[data.posture] || '-'],
+    ['감지 상태 유지', num(fsm.state_for, '초')],
+    ['누운 시간 / T1', fsm.lying_for === null ? '-'
+      : `${fsm.lying_for}초 / ${t.t1_lying_seconds}초 (${t.lying_gap_seconds}초 이하 끊김은 이어서 잼)`],
+    ['처리 / 버린 프레임', `${data.frames_processed} / ${data.frames_dropped}`],
+  ];
+  const lyingFor = fsm.lying_for || 0;
+  const fill = el('div', { class: 'meter-fill' });
+  fill.style.width = `${Math.min(100, (100 * lyingFor) / t.t1_lying_seconds)}%`;
+  const meter = el('div', {
+    class: 'meter', role: 'progressbar', 'aria-label': '누운 자세 유지 시간',
+    'aria-valuemin': 0, 'aria-valuemax': t.t1_lying_seconds, 'aria-valuenow': lyingFor,
+  }, [fill]);
+  $('#live-state').replaceChildren(
+    el('div', { class: 'live-badges' }, [
+      fsmBadge(data.state),
+      data.event_state && data.event_state !== data.state
+        ? el('span', { class: 'muted small', text: `이벤트 ${data.event_state}` }) : null,
+    ]),
+    el('dl', { class: 'kv' }, rows.flatMap(([k, v]) => [el('dt', { text: k }), el('dd', { text: v })])),
+    meter,
+  );
+  const featureRows = [
+    ['하강 속도', f ? f.descent_velocity : null, `${t.descent_velocity_peak} 이상이면 하강 감지`,
+      Boolean(f) && f.descent_velocity >= t.descent_velocity_peak],
+    ['몸통 각도', f ? `${f.torso_angle}°` : null, `${t.torso_angle_lying}° 이상 누움 · ${t.torso_angle_standing}° 미만 서 있음`,
+      Boolean(f) && f.torso_angle >= t.torso_angle_lying],
+    ['종횡비 (가로/세로)', f ? f.aspect_ratio : null, `${t.aspect_ratio_lying} 이상 누움 · ${t.aspect_ratio_standing} 미만 서 있음`,
+      Boolean(f) && f.aspect_ratio >= t.aspect_ratio_lying],
+    ['움직임량', f ? f.motion_quantity : null, '기록용 (판정에 쓰지 않음)', false],
+  ];
+  fillTable($('#live-features'), featureRows.map(([k, v, c, hit]) => el('tr', { class: hit ? 'is-hit' : '' }, [
+    td(k), td(v, 'num'), td(c),
+  ])), '-');
+  renderLiveCharts(data.history, t);
+}
+
+function renderLiveCharts(history, thresholds) {
+  const box = $('#live-charts');
+  if (!history.length) {
+    box.replaceChildren();
+    return;
+  }
+  const W = 400;
+  const H = 60;
+  const tEnd = history[history.length - 1].t;
+  const tStart = tEnd - LIVE_HISTORY_SECONDS;
+  const x = (t) => ((t - tStart) / LIVE_HISTORY_SECONDS) * W;
+  box.replaceChildren(...LIVE_CHARTS.map((c) => {
+    const lines = c.lines(thresholds);
+    const values = history.map((h) => (h.features ? h.features[c.key] : null));
+    const present = values.filter((v) => v !== null);
+    const min = c.min;
+    const max = c.max !== undefined ? c.max : Math.max(...lines.map((l) => l.v * 1.5), ...present, min + 0.1);
+    const y = (v) => H - ((Math.min(max, Math.max(min, v)) - min) / (max - min)) * H;
+    const root = svg('svg', { class: 'live-chart', viewBox: `0 0 ${W} ${H}`, preserveAspectRatio: 'none', 'aria-hidden': 'true' });
+    // 하강·의심·경보 구간을 배경색 띠로
+    history.forEach((h, i) => {
+      if (h.state === 'NORMAL') return;
+      const next = history[i + 1];
+      const x0 = x(h.t);
+      const x1 = next ? x(next.t) : W;
+      root.append(svg('rect', { x: x0, y: 0, width: Math.max(1, x1 - x0), height: H, fill: OVERLAY_COLORS[h.state] || '#999', opacity: 0.3 }));
+    });
+    for (const line of lines) {
+      root.append(svg('line', { x1: 0, x2: W, y1: y(line.v), y2: y(line.v), class: 'threshold' }));
+    }
+    // 값 선. 사람이 없던 구간은 끊는다.
+    let d = '';
+    let pen = false;
+    history.forEach((h, i) => {
+      const v = values[i];
+      if (v === null) { pen = false; return; }
+      d += `${pen ? 'L' : 'M'}${x(h.t).toFixed(1)},${y(v).toFixed(1)} `;
+      pen = true;
+    });
+    root.append(svg('path', { d, class: 'series' }));
+    const last = present.length ? present[present.length - 1] : null;
+    return el('div', { class: 'live-chart-block' }, [
+      el('div', { class: 'live-chart-head small' }, [
+        el('span', { text: c.label }),
+        el('span', { class: 'muted', text: `지금 ${last === null ? '-' : last} · 기준 ${lines.map((l) => `${l.name} ${l.v}`).join(', ')}` }),
+      ]),
+      root,
+    ]);
+  }));
 }
 
 // ---------------------------------------------------------------- 사용자
@@ -861,6 +1188,7 @@ function renderDayChart(perDay) {
 // ---------------------------------------------------------------- 시작
 
 setupTabs();
+setupLive();
 setupUserSearch();
 setupDeleteDialog();
 setupFilters();

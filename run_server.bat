@@ -1,7 +1,8 @@
 @echo off
 rem Fall detection central server - one-click setup and start (Windows).
 rem Double-click this file. It will:
-rem   1. find Python 3.10-3.13, or install Python 3.11 with winget if none is found
+rem   1. find Python 3.10-3.13, or install Python 3.12 with winget if none is found
+rem      (a .venv made with another Python version is deleted and made again)
 rem   2. create the virtual environment (.venv) on first run
 rem   3. run "run_server.py --auto": install packages (GPU PyTorch if an NVIDIA GPU is present),
 rem      install mkcert, create the HTTPS certificate, open the firewall port,
@@ -13,7 +14,19 @@ title Fall Detection Server
 chcp 65001 >nul
 
 set "VENV_PY=%~dp0.venv\Scripts\python.exe"
-if exist "%VENV_PY%" goto run
+if not exist "%VENV_PY%" goto findpy
+rem numpy, OpenCV and PyTorch have no wheels for Python newer than 3.13 yet, so such a .venv
+rem cannot install the packages (pip tries to compile numpy and fails). Rebuild it.
+"%VENV_PY%" -c "import sys; v=sys.version_info[:2]; ok=(3,10)<=v<=(3,13); ok or print(f'The existing .venv uses Python {v[0]}.{v[1]}, which numpy, OpenCV and PyTorch do not support yet.'); sys.exit(0 if ok else 1)"
+if not errorlevel 1 goto run
+echo Deleting .venv and creating it again with Python 3.10 - 3.13 ...
+rmdir /s /q .venv
+if exist .venv (
+    echo Could not delete .venv. Close any program using it, delete the .venv folder, then run this file again.
+    goto end
+)
+
+:findpy
 
 echo [1/3] Looking for Python 3.10 - 3.13 ...
 set "PYEXE="
@@ -24,18 +37,18 @@ if not defined PYEXE call :try py -3.13
 if not defined PYEXE call :try python
 if defined PYEXE goto mkvenv
 
-echo Python was not found. Installing Python 3.11 with winget ...
+echo Python was not found. Installing Python 3.12 with winget ...
 where winget >nul 2>nul
 if errorlevel 1 goto nopython
-winget install -e --id Python.Python.3.11 --scope user --accept-package-agreements --accept-source-agreements
-call :try "%LOCALAPPDATA%\Programs\Python\Python311\python.exe"
-if not defined PYEXE call :try py -3.11
+winget install -e --id Python.Python.3.12 --scope user --accept-package-agreements --accept-source-agreements
+call :try "%LOCALAPPDATA%\Programs\Python\Python312\python.exe"
+if not defined PYEXE call :try py -3.12
 if defined PYEXE goto mkvenv
 
 :nopython
 echo.
 echo Could not install Python automatically.
-echo Install Python 3.11 from https://www.python.org/downloads/
+echo Install Python 3.12 from https://www.python.org/downloads/
 echo (check "Add python.exe to PATH"), then run this file again.
 start "" https://www.python.org/downloads/
 goto end

@@ -136,14 +136,35 @@ def test_peak_then_lying_for_t1_is_suspect(fsm):
     assert fsm.suspect_features == LYING
 
 
-def test_lying_must_be_continuous(fsm):
+def test_short_break_in_lying_keeps_t1(fsm):
     fsm.update(PEAK_LYING, now=0.0)
-    fsm.update(LYING, now=1.5)
-    fsm.update(BENT, now=1.8)   # 누움이 끊김 -> T1 다시 측정
-    fsm.update(LYING, now=2.1)
-    assert fsm.state == FallState.FALLING
-    fsm.update(LYING, now=4.2)
+    fsm.update(LYING, now=1.0)
+    fsm.update(BENT, now=1.3)   # 뒤척임(누움도 기립도 아님)
+    fsm.update(None, now=1.6)   # 잠깐 화면 밖
+    fsm.update(LYING, now=2.0)  # 마지막 누움(1.0초)에서 1초 이내로 끊겼으므로 0초부터 이어서 잰다
     assert fsm.state == FallState.SUSPECT
+
+
+def test_long_break_in_lying_restarts_t1(fsm):
+    fsm.update(PEAK_LYING, now=0.0)
+    fsm.update(LYING, now=1.0)
+    fsm.update(BENT, now=1.5)
+    fsm.update(BENT, now=2.1)   # 마지막 누움에서 1.1초 -> T1을 다시 잰다
+    assert fsm.lying_since is None
+    fsm.update(LYING, now=2.5)
+    fsm.update(LYING, now=4.4)
+    assert fsm.state == FallState.FALLING
+    fsm.update(LYING, now=4.5)
+    assert fsm.state == FallState.SUSPECT
+
+
+def test_lying_gap_is_configurable():
+    strict = FallFSM(descent_peak=2.0, t1_lying_seconds=2.0, falling_timeout=5.0, angle_lying=60, aspect_lying=1.0,
+                     angle_standing=40, aspect_standing=0.8, lying_gap=0.0)
+    strict.update(PEAK_LYING, now=0.0)
+    strict.update(BENT, now=1.0)   # 허용 간격 0 -> 한 장만 끊겨도 다시 잰다(예전 동작)
+    strict.update(LYING, now=2.0)
+    assert strict.state == FallState.FALLING and strict.lying_since == 2.0
 
 
 def test_missing_person_is_not_standing(fsm):
@@ -152,9 +173,10 @@ def test_missing_person_is_not_standing(fsm):
     assert fsm.state == FallState.FALLING
 
 
-def test_missing_person_interrupts_lying_timer(fsm):
+def test_long_missing_person_interrupts_lying_timer(fsm):
     fsm.update(PEAK_LYING, now=0.0)
-    fsm.update(None, now=1.0)       # 가려짐도 '누움 연속'을 끊는다
+    fsm.update(None, now=0.6)
+    fsm.update(None, now=1.2)       # 1초 넘게 안 보이면 '누움 연속'을 끊는다
     fsm.update(LYING, now=1.5)
     fsm.update(LYING, now=2.5)
     assert fsm.state == FallState.FALLING
@@ -189,8 +211,78 @@ def test_from_settings_uses_configured_thresholds():
                  torso_angle_standing=35.0, aspect_ratio_standing=0.7)
     f = FallFSM.from_settings(s)
     assert (f.descent_peak, f.t1, f.falling_timeout) == (3.5, 0.3, 7.0)
+    assert f.lying_gap == Settings().lying_gap_seconds == 1.0
     assert (f.angle_lying, f.aspect_lying, f.angle_standing, f.aspect_standing) == (55.0, 1.2, 35.0, 0.7)
     assert f.state == FallState.NORMAL
+
+
+# 실제 낙상 영상(1920x1080, 60fps, 손으로 든 휴대폰)을 휴대폰 카메라 화면처럼 긴 변 640px·JPEG 0.7·초당 10장으로 바꿔
+# YOLOv8n-pose와 FeatureExtractor에 넣어 얻은 특징값 (시각, (하강 속도, 몸통 각도, 종횡비)). 2.8초 앞은 의자에서
+# 일어서는 장면(모두 서 있음)이라 생략했다. 3.2초에 옆으로 넘어지고, 3.6~3.8초에는 머리가 화면 밖으로 나가 어깨
+# 신뢰도가 떨어져 '사람 없음'이 되며, 4.0초에는 다리를 들어 몸통 각도 59°·종횡비 0.85의 중간 자세가 한 장 나온다.
+# 영상은 5.0초(바닥에 앉은 채)에서 끝난다.
+RECORDED_FALL = [
+    (2.80, (0.16, 9.47, 0.567)),
+    (2.90, (0.555, 11.36, 0.635)),
+    (3.00, (0.88, 15.99, 0.694)),
+    (3.10, (1.236, 17.63, 0.841)),
+    (3.20, (1.809, 17.85, 1.013)),
+    (3.30, (2.579, 25.64, 1.07)),
+    (3.40, (3.359, 40.74, 1.746)),
+    (3.51, (2.33, 67.35, 2.739)),
+    (3.61, None),
+    (3.71, None),
+    (3.81, None),
+    (3.91, (-0.143, 52.78, 1.108)),
+    (4.01, (-0.718, 59.15, 0.853)),
+    (4.11, (-0.578, 69.55, 0.991)),
+    (4.21, (0.484, 69.13, 0.985)),
+    (4.31, (0.493, 68.27, 1.078)),
+    (4.41, (-0.052, 73.48, 1.313)),
+    (4.51, (0.313, 90.0, 1.926)),
+    (4.61, (0.744, 76.05, 2.735)),
+    (4.71, (1.254, 60.77, 2.405)),
+    (4.81, (0.483, 56.38, 2.19)),
+    (4.91, (-0.143, 48.23, 2.001)),
+    (5.02, (-0.382, 40.62, 1.821)),
+]
+
+
+def _recorded(hold_seconds=0.0):
+    """RECORDED_FALL 뒤에 마지막 장면(바닥에 앉음)을 hold_seconds만큼 초당 10장으로 더 붙인다."""
+    frames = [(t, None if f is None else dict(zip(("descent_velocity", "torso_angle", "aspect_ratio"), f)))
+              for t, f in RECORDED_FALL]
+    last_t, last = frames[-1]
+    for k in range(1, int(round(hold_seconds * 10)) + 1):
+        frames.append((round(last_t + k / 10, 2), last))
+    return frames
+
+
+def test_recorded_fall_keeps_lying_timer_through_short_gaps(fsm):
+    """넘어진 순간(3.3초)부터 T1을 재고, 화면 밖으로 나간 0.3초와 다리를 든 한 장에 끊기지 않는다."""
+    lying_since = []
+    for t, f in _recorded():
+        fsm.update(f, now=t)
+        lying_since.append(fsm.lying_since)
+    assert fsm.state == FallState.FALLING          # 영상 길이(누운 지 1.7초)로는 아직 T1(2초) 전
+    assert set(lying_since[lying_since.index(3.30):]) == {3.30}
+
+
+def test_recorded_fall_reaches_suspect_two_seconds_after_falling(fsm):
+    states = {}
+    for t, f in _recorded(hold_seconds=1.0):
+        states[t] = fsm.update(f, now=t)
+    first_suspect = min(t for t, s in states.items() if s == FallState.SUSPECT)
+    assert first_suspect == pytest.approx(3.30 + 2.0, abs=0.11)
+    assert fsm.suspect_features["aspect_ratio"] >= 1.0
+
+
+def test_recorded_standing_up_from_chair_is_not_a_fall(fsm):
+    """같은 영상의 일어서기 구간(하강 속도 1 미만)만으로는 하강으로 보지 않는다."""
+    for t, f in _recorded():
+        if t >= 3.0:
+            break
+        assert fsm.update(f, now=t) == FallState.NORMAL
 
 
 def test_fall_state_is_plain_string_for_json():
@@ -366,3 +458,22 @@ def test_create_pose_estimator_yolo_uses_settings(monkeypatch):
                                          keypoint_min_confidence=0.7))
     assert isinstance(est, YoloPoseEstimator)
     assert est._model.path == "x.pt" and est.min_conf == 0.7
+
+
+def test_replay_video_samples_like_phone_camera(tmp_path):
+    """녹화 영상 시험 도구: 휴대폰 화면처럼 긴 변 640px, 초당 10장으로 뽑고 --hold만큼 마지막 장면을 더 넣는다."""
+    from server.replay_video import sample_frames
+
+    path = str(tmp_path / "clip.avi")
+    writer = cv2.VideoWriter(path, cv2.VideoWriter_fourcc(*"MJPG"), 30.0, (1280, 720))
+    for i in range(30):   # 1초
+        writer.write(np.full((720, 1280, 3), i * 8, dtype=np.uint8))
+    writer.release()
+
+    frames = sample_frames(path, fps=10.0, hold=0.5)
+    assert len(frames) == 10 + 5
+    times = [t for t, _ in frames]
+    assert times[:3] == pytest.approx([0.0, 0.1, 0.2]) and times[-1] == pytest.approx(0.9 + 0.5)
+    first = cv2.imdecode(np.frombuffer(frames[0][1], np.uint8), cv2.IMREAD_COLOR)
+    assert first.shape[:2] == (360, 640)
+    assert frames[-1][1] == frames[9][1]

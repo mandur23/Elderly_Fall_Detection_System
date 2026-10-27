@@ -59,6 +59,8 @@ class Settings:
     torso_angle_standing: float = 40.0   # 이 각도 미만이고
     aspect_ratio_standing: float = 0.8   # 종횡비가 이 값 미만이면 다시 일어선 것으로 본다
     t1_lying_seconds: float = field(default_factory=lambda: _env_float("FALL_T1_SECONDS", 2.0))
+    # T1을 재는 동안 누운 장면 사이에 '사람 없음'·'중간 자세'가 이 시간까지 끼어도 이어서 잰다(뒤척임, 화면 밖)
+    lying_gap_seconds: float = 1.0
     falling_timeout_seconds: float = 5.0
 
     # --- 기기 상태 ---

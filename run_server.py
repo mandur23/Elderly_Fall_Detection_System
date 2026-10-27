@@ -115,8 +115,10 @@ def main() -> int:
     parser.add_argument("--no-browser", action="store_true", help="관리자 화면을 자동으로 열지 않음")
     args = parser.parse_args()
 
-    if sys.version_info < (3, 10):
-        say("Python 3.10 이상이 필요합니다.")
+    if not (3, 10) <= sys.version_info[:2] <= (3, 13):
+        say(f"Python 3.10~3.13이 필요합니다(지금은 {sys.version.split()[0]}). "
+            "더 새로운 Python은 numpy·OpenCV·PyTorch의 설치 파일(wheel)이 아직 없어 패키지 설치에 실패합니다.")
+        say("해결: .venv 폴더를 지우고 run_server.bat(macOS·Linux는 run_server.sh)을 다시 실행하면 지원되는 Python으로 다시 만듭니다.")
         return 1
     os.chdir(ROOT)  # 어디서 실행해도 web/, data/를 찾도록
     if args.auto and not auto_setup.ensure_packages(args.fake):

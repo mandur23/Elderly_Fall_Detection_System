@@ -28,6 +28,7 @@ local_access_problem()이다. 검사는 다섯 가지다.
 상태를 바꾸는 관리자 동작은 모두 log.warning("관리자: ...")으로 남긴다.
 """
 
+import base64
 import csv
 import io
 import ipaddress
@@ -521,6 +522,48 @@ async def overview(request: Request):
         "active_events": active_events,
         "notification_failures": failures,
     }
+
+
+def _detection_thresholds(settings) -> Dict[str, float]:
+    """실시간 보기 옆에 보여 줄 낙상 판정 기준값(server/detection/fsm.py가 쓰는 값 전부)."""
+    return {
+        "descent_velocity_peak": settings.descent_velocity_peak,
+        "t1_lying_seconds": settings.t1_lying_seconds,
+        "lying_gap_seconds": settings.lying_gap_seconds,
+        "falling_timeout_seconds": settings.falling_timeout_seconds,
+        "torso_angle_lying": settings.torso_angle_lying,
+        "aspect_ratio_lying": settings.aspect_ratio_lying,
+        "torso_angle_standing": settings.torso_angle_standing,
+        "aspect_ratio_standing": settings.aspect_ratio_standing,
+        "camera_stale_seconds": settings.camera_stale_seconds,
+    }
+
+
+@router.get("/admin/api/devices/{device_id}/live")
+async def device_live(device_id: int, request: Request, after: int = Query(0, ge=0)):
+    """기기가 보낸 가장 최근 장면과 그 장면의 낙상 판정 상태(관리자 화면의 실시간 보기).
+
+    관리자 화면이 0.2초마다 부른다. after에 이전 응답의 seq를 주면 새 장면이 없을 때 204로 답해
+    같은 장면을 다시 보내지 않는다. 영상은 서버 메모리의 마지막 한 장뿐이고 어디에도 저장하지 않으며,
+    다른 관리자 API처럼 서버 PC에서만 열린다(AdminGuard).
+    """
+    state = _state(request)
+    if state.accounts.get_device(device_id) is None:
+        raise HTTPException(status_code=404, detail="기기가 없습니다.")
+    thresholds = _detection_thresholds(state.settings)
+    view = state.devices.live_view(device_id)
+    if view is None:
+        return {"device_id": device_id, "online": state.devices.is_online(device_id), "seq": 0,
+                "frame": None, "thresholds": thresholds}
+    if after and view["seq"] == after:
+        return Response(status_code=204)
+    frame = view.pop("frame")
+    view["online"] = True
+    view["frame"] = base64.b64encode(frame).decode("ascii")
+    # 휴대폰·Pi는 JPEG를 보낸다. 시험용 가짜 추정기의 프레임은 JSON이라 화면에는 그릴 수 없다.
+    view["frame_mime"] = "image/jpeg" if frame[:2] == b"\xff\xd8" else "application/octet-stream"
+    view["thresholds"] = thresholds
+    return view
 
 
 # ---------------------------------------------------------------------------

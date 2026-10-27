@@ -44,6 +44,39 @@
         </section>
       </div>
 
+      <section class="card" aria-labelledby="h-live">
+        <div class="card-head">
+          <h2 id="h-live">실시간 영상·낙상 판정</h2>
+          <label class="small live-pick">기기
+            <select id="live-device"><option value="">기기를 고르세요</option></select>
+          </label>
+          <label class="small"><input id="live-pause" type="checkbox"> 멈춤 (장면을 자세히 보기)</label>
+          <span id="live-info" class="muted small"></span>
+          <span id="live-error" class="form-error small hidden" role="alert"></span>
+        </div>
+        <p class="muted small">접속 중인 기기가 보낸 가장 최근 장면 위에 관절(하늘색 점), 판정에 쓰는 어깨·엉덩이(노란 점)와
+          몸통 선(주황), 사람 상자(감지 상태 색)를 그립니다. 아래 기기 표에서 기기 이름을 눌러도 고를 수 있습니다.
+          영상은 서버 메모리의 마지막 한 장뿐이며 저장하지 않습니다.</p>
+        <div class="live-grid">
+          <div class="live-view">
+            <canvas id="live-canvas" width="640" height="480" aria-label="기기가 보낸 최근 장면과 자세 추정 결과"></canvas>
+            <p id="live-empty" class="empty">위에서 기기를 고르세요.</p>
+          </div>
+          <div class="live-side">
+            <div id="live-state" aria-live="polite"></div>
+            <h3>특징값과 판정 기준</h3>
+            <div class="table-wrap">
+              <table id="live-features" class="data">
+                <thead><tr><th scope="col">특징</th><th scope="col">지금 값</th><th scope="col">기준</th></tr></thead>
+                <tbody></tbody>
+              </table>
+            </div>
+            <h3>최근 15초</h3>
+            <div id="live-charts" class="live-charts"></div>
+          </div>
+        </div>
+      </section>
+
       <section class="card" aria-labelledby="h-devices">
         <h2 id="h-devices">기기 상태</h2>
         <div class="table-wrap">

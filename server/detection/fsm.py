@@ -4,8 +4,13 @@ FSM은 '낙상 의심'까지만 판단한다. 음성 확인, 경보, 해제는 �
 맡고, FSM은 SUSPECT가 된 뒤 이벤트가 끝났다고 알려 줄 때(reset)까지 그대로 머문다.
 이렇게 해야 같은 낙상으로 이벤트가 여러 번 만들어지지 않는다.
 
-    NORMAL --하강 속도 피크--> FALLING --누운 자세 T1 연속 유지--> SUSPECT --reset()--> NORMAL
+    NORMAL --하강 속도 피크--> FALLING --누운 자세 T1 유지--> SUSPECT --reset()--> NORMAL
                                   |--다시 일어섬 / 시간 초과--> NORMAL
+
+T1을 잴 때 누운 장면 사이에 '사람 없음'이나 '누움도 기립도 아닌 자세'가 잠깐(lying_gap 이하) 끼는 것은
+허용한다. 넘어진 뒤에는 몸 일부가 화면 밖으로 나가거나(어깨 신뢰도가 떨어져 사람 없음이 됨) 다리를
+들어 올리며 뒤척이는 일이 흔한데, 한 장만 끊겨도 T1을 다시 재면 실제 낙상을 놓친다.
+(실제 낙상 영상 시험에서 확인: server/tests/test_detection.py의 RECORDED_FALL)
 
 콜백은 두지 않는다. 호출 측이 update() 전후 상태를 비교해 전이를 알아낸다.
 """
@@ -30,6 +35,7 @@ class FallFSM:
         aspect_lying: float,
         angle_standing: float,
         aspect_standing: float,
+        lying_gap: float = 1.0,
     ):
         self.descent_peak = descent_peak
         self.t1 = t1_lying_seconds
@@ -38,10 +44,12 @@ class FallFSM:
         self.aspect_lying = aspect_lying
         self.angle_standing = angle_standing
         self.aspect_standing = aspect_standing
+        self.lying_gap = lying_gap
 
         self.state = FallState.NORMAL
         self.state_since = 0.0
         self.lying_since: Optional[float] = None
+        self.last_lying_at: Optional[float] = None   # 마지막으로 누운 자세를 본 시각
         # SUSPECT로 넘어간 순간의 특징값. 이벤트 기록에 남기기 위해 보관한다.
         self.suspect_features: Optional[Dict[str, float]] = None
 
@@ -56,6 +64,7 @@ class FallFSM:
             aspect_lying=settings.aspect_ratio_lying,
             angle_standing=settings.torso_angle_standing,
             aspect_standing=settings.aspect_ratio_standing,
+            lying_gap=settings.lying_gap_seconds,
         )
 
     def is_lying(self, f: Dict[str, float]) -> bool:
@@ -71,6 +80,10 @@ class FallFSM:
         self.state_since = now
         if new_state != FallState.FALLING:
             self.lying_since = None
+            self.last_lying_at = None
+
+    def _lying_gap_exceeded(self, now: float) -> bool:
+        return self.last_lying_at is not None and now - self.last_lying_at > self.lying_gap
 
     def update(self, features: Optional[Dict[str, float]], now: float) -> FallState:
         """프레임마다 호출한다. features가 None이면 사람이 검출되지 않은 프레임이다.
@@ -81,7 +94,8 @@ class FallFSM:
         if self.state == FallState.NORMAL:
             if features is not None and features["descent_velocity"] >= self.descent_peak:
                 self._transition(FallState.FALLING, now)
-                self.lying_since = now if self.is_lying(features) else None
+                if self.is_lying(features):
+                    self.lying_since = self.last_lying_at = now
 
         elif self.state == FallState.FALLING:
             if features is not None and self.is_standing(features):
@@ -89,13 +103,16 @@ class FallFSM:
             elif features is not None and self.is_lying(features):
                 if self.lying_since is None:
                     self.lying_since = now
-                elif now - self.lying_since >= self.t1:
+                self.last_lying_at = now
+                if now - self.lying_since >= self.t1:
                     self.suspect_features = dict(features)
                     self._transition(FallState.SUSPECT, now)
             else:
-                # 누운 자세가 끊기면 T1을 처음부터 다시 잰다.
-                self.lying_since = None
-                if now - self.state_since >= self.falling_timeout:
+                # 사람이 안 보이거나 누움도 기립도 아닌 장면. lying_gap 이하로 짧게 끊긴 것은 넘어진 뒤
+                # 뒤척이는 모습으로 보고 T1을 이어서 잰다. 그보다 오래 끊기면 T1을 처음부터 다시 잰다.
+                if self.lying_since is not None and self._lying_gap_exceeded(now):
+                    self.lying_since = self.last_lying_at = None
+                if self.lying_since is None and now - self.state_since >= self.falling_timeout:
                     self._transition(FallState.NORMAL, now)
 
         # SUSPECT는 이벤트 서비스의 reset() 호출로만 빠져나간다.

@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Deque, Dict, List, Optional, Set
 
 from server.config import Settings
-from server.detection import FallFSM, FallState, FeatureExtractor, PoseEstimator
+from server.detection import FallFSM, FallState, FeatureExtractor, Keypoints, PoseEstimator
 
 log = logging.getLogger("server.devices")
 
@@ -32,12 +32,31 @@ DEVICE_SEND_TIMEOUT = 5.0
 STATUS_CHECK_INTERVAL = 1.0
 # fps 계산에 쓰는 최근 구간(초)
 FPS_WINDOW_SECONDS = 2.0
+# 관리자 화면의 실시간 보기에 보여 줄 최근 분석 기록 수(초당 10장이면 15초)
+LIVE_HISTORY_LEN = 150
 
 
 def watcher_ids(accounts: Any, owner_id: int) -> List[int]:
     """기기·이벤트를 볼 수 있는 사람: 주인 본인 + 수락된 보호자. 보낼 때마다 DB에서 다시 읽어
     보호자 연결을 해제하면 바로 다음 메시지부터 받지 않게 한다."""
     return [owner_id] + [g for g in accounts.guardian_ids_for(owner_id) if g != owner_id]
+
+
+def keypoints_view(kp: Optional[Keypoints]) -> Optional[Dict[str, Any]]:
+    """관리자 화면에 그릴 관절 좌표(프레임 픽셀 기준). 사람이 없으면 None."""
+    if kp is None:
+        return None
+
+    def point(p) -> List[float]:
+        return [round(float(p[0]), 1), round(float(p[1]), 1)]
+
+    return {
+        "bbox": [round(float(v), 1) for v in kp.bbox],
+        "shoulders": [point(kp.left_shoulder), point(kp.right_shoulder)],
+        "hips": [point(kp.left_hip), point(kp.right_hip)],
+        "points": [point(p) for p in kp.all_points],
+        "confidence": round(float(kp.confidence), 3),
+    }
 
 
 class BackgroundTasks:
@@ -91,6 +110,12 @@ class DeviceSession:
     frame_times: Deque[float] = field(default_factory=lambda: deque(maxlen=60))
     # 마지막으로 보호자 화면에 보낸 상태(바뀐 것만 보내기 위해)
     last_sent: Optional[Dict[str, Any]] = None
+    # 관리자 화면의 실시간 보기용: 가장 최근 프레임(JPEG 바이트)과 그 분석 결과. 서버 메모리에 한 장만 두고
+    # 어디에도 저장하지 않으며, 연결이 끊기면 세션과 함께 사라진다. 서버 PC의 관리자 페이지에서만 읽는다.
+    last_frame: Optional[bytes] = None
+    last_keypoints: Optional[Dict[str, Any]] = None
+    frame_seq: int = 0
+    history: Deque[Dict[str, Any]] = field(default_factory=lambda: deque(maxlen=LIVE_HISTORY_LEN))
 
     @property
     def device_id(self) -> int:
@@ -277,11 +302,15 @@ class DeviceHub:
             session.person_detected = keypoints is not None
             features = session.extractor.extract(keypoints, t) if keypoints is not None else None
             session.features = features
+            session.last_frame = frame_bytes
+            session.last_keypoints = keypoints_view(keypoints)
+            session.frame_seq += 1
 
             previous_state = session.fsm.state
             state = session.fsm.update(features, t)
             if state != previous_state:
                 log.info("기기 %s 감지 상태: %s -> %s", session.device_id, previous_state.value, state.value)
+            session.history.append({"t": round(t, 3), "state": state.value, "features": features})
             if state == FallState.SUSPECT and previous_state != FallState.SUSPECT and self.events is not None:
                 await self.events.on_suspect(session, session.fsm.suspect_features or features or {})
 
@@ -340,6 +369,49 @@ class DeviceHub:
             "person_detected": bool(camera_ok and session.person_detected),
             "fps": session.fps(now) if camera_ok else 0.0,
             "state": self._state(device["id"], session),
+        }
+
+    def live_view(self, device_id: int) -> Optional[Dict[str, Any]]:
+        """관리자 화면의 실시간 보기: 가장 최근 프레임과 그 장면의 관절·특징값·FSM 상태.
+
+        접속해 있지 않거나 아직 프레임을 받지 못했으면 None. 'frame'은 JPEG 바이트 그대로이며 호출 측이 인코딩한다.
+        """
+        session = self.sessions.get(device_id)
+        if session is None or session.closed or session.last_frame is None or session.last_frame_at is None:
+            return None
+        now = self.clock()
+        fsm, features = session.fsm, session.features
+        if features is None:
+            posture = None
+        elif fsm.is_lying(features):
+            posture = "lying"
+        elif fsm.is_standing(features):
+            posture = "standing"
+        else:
+            posture = "between"
+        return {
+            "device_id": device_id,
+            "seq": session.frame_seq,
+            "frame": session.last_frame,
+            "frame_age": round(now - session.last_frame_at, 2),
+            "fps": session.fps(now),
+            "camera_ok": self._camera_ok(session, now),
+            "person_detected": session.person_detected,
+            "keypoints": session.last_keypoints,
+            "features": features,
+            "posture": posture,
+            "fsm": {
+                "state": fsm.state.value,
+                # state_since는 첫 전이 전에는 0이라 그때는 알 수 없다
+                "state_for": round(now - fsm.state_since, 2) if fsm.state_since > 0 else None,
+                "lying_for": round(now - fsm.lying_since, 2) if fsm.lying_since is not None else None,
+                "suspect_features": fsm.suspect_features,
+            },
+            "event_state": self.events.state_for_device(device_id) if self.events is not None else None,
+            "state": self._state(device_id, session),
+            "frames_processed": session.frames_processed,
+            "frames_dropped": session.frames_dropped,
+            "history": list(session.history),
         }
 
     def statuses_for(self, owner_ids: List[int]) -> List[Dict[str, Any]]:

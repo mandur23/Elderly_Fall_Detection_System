@@ -9,6 +9,7 @@
 앱과 실시간 도우미(가짜 자세 추정·음성 인식, 카메라 WebSocket)는 test_realtime.py의 것을 그대로 쓴다.
 """
 
+import base64
 import csv
 import io
 import sqlite3
@@ -44,6 +45,7 @@ from server.tests.test_realtime import (
     upload,
     wait_until,
 )
+from server.detection import fake_frame
 
 LOCAL = ("127.0.0.1", 50000)
 REMOTE = ("192.168.0.20", 50000)
@@ -413,6 +415,52 @@ def test_overview_shows_devices_active_event_and_failures(family):
     assert all(f["event_id"] == event_id and f["guardian_name"] == "아들" for f in failures)
     # 경보로 바뀐 시각이 남는다(경보 -> 해제 시간 통계)
     assert family.app.state.db.query_one("SELECT alarm_at FROM events WHERE id = ?", (event_id,))["alarm_at"]
+
+
+def test_device_live_view_shows_frame_keypoints_and_detection(family):
+    """실시간 보기: 접속 전에는 영상 없음, 프레임을 받으면 그 장면·관절·특징값·FSM 상태, 낙상 뒤에는 SUSPECT."""
+    admin, device_id = family.admin, family.device_id
+    url = f"/admin/api/devices/{device_id}/live"
+    body = admin.get(url).json()
+    assert body["online"] is False and body["frame"] is None and body["seq"] == 0
+    assert body["thresholds"]["descent_velocity_peak"] == 2.0 and body["thresholds"]["t1_lying_seconds"] == 0.3
+    assert admin.get("/admin/api/devices/999/live").status_code == 404
+
+    with camera(family.main, device_id, family.key) as ws:
+        open_camera(ws)
+        ws.send_bytes(fake_frame("standing"))
+        wait_until(lambda: family.app.state.devices.sessions[device_id].frame_seq >= 1)
+        body = admin.get(url).json()
+        assert body["online"] is True and body["seq"] == 1 and body["person_detected"] is True
+        # 프레임은 받은 그대로(가짜 추정기의 프레임은 JSON이라 JPEG가 아니라고 표시된다)
+        assert base64.b64decode(body["frame"]) == fake_frame("standing")
+        assert body["frame_mime"] == "application/octet-stream"
+        kp = body["keypoints"]
+        assert kp["bbox"] == [290, 150, 350, 450] and kp["shoulders"] == [[305, 200], [335, 200]]
+        assert kp["hips"] == [[310, 300], [330, 300]] and len(kp["points"]) == 4 and kp["confidence"] == 1
+        assert body["features"]["torso_angle"] == 0 and body["features"]["aspect_ratio"] == 0.2
+        assert body["posture"] == "standing" and body["fsm"]["state"] == "NORMAL" and body["state"] == "NORMAL"
+        assert body["event_state"] is None and body["fsm"]["lying_for"] is None
+        assert body["frames_processed"] == 1 and body["history"][-1]["state"] == "NORMAL"
+        # 같은 장면을 또 달라고 하면(after=seq) 내용 없이 204
+        assert admin.get(f"{url}?after={body['seq']}").status_code == 204
+        assert admin.get(f"{url}?after={body['seq'] - 1}").status_code == 200
+
+        fall_and_get_voice_check(ws)
+        body = admin.get(url).json()
+        assert body["posture"] == "lying" and body["fsm"]["state"] == "SUSPECT"
+        assert body["state"] == "SUSPECT" and body["event_state"] == "SUSPECT"
+        assert body["fsm"]["suspect_features"]["aspect_ratio"] >= 1.0
+        # 기록에는 서 있음 -> 하강 -> 의심의 흐름이 남는다
+        assert {h["state"] for h in body["history"]} == {"NORMAL", "FALLING", "SUSPECT"}
+        assert all(h["features"] is not None for h in body["history"])
+
+    # 연결이 끊기면 장면도 함께 사라진다
+    wait_until(lambda: not family.app.state.devices.is_online(device_id))
+    assert admin.get(url).json() == {"device_id": device_id, "online": False, "seq": 0, "frame": None,
+                                     "thresholds": body["thresholds"]}
+    # 같은 Wi-Fi의 다른 기기에서는 다른 관리자 API처럼 404
+    assert admin_client(family.main, client=REMOTE).get(url).status_code == 404
 
 
 def test_users_list_search_and_detail(family):

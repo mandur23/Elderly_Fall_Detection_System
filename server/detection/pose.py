@@ -105,7 +105,10 @@ class YoloPoseEstimator(PoseEstimator):
             conf = _to_numpy(result.keypoints.conf)[best]
         else:
             conf = np.ones(len(points))
-        return keypoints_from(points, conf, self.min_conf)
+        kp = keypoints_from(points, conf, self.min_conf)
+        if kp is not None:
+            kp.image_height, kp.image_width = frame.shape[:2]
+        return kp
 
 
 class FakePoseEstimator(PoseEstimator):

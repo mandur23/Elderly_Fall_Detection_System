@@ -22,6 +22,8 @@ class Keypoints:
     bbox: Tuple[float, float, float, float]  # (xmin, ymin, xmax, ymax)
     all_points: np.ndarray                   # (N, 2) 신뢰도 기준을 통과한 관절 좌표
     confidence: float = 1.0
+    image_width: int = 0
+    image_height: int = 0
 
     @property
     def shoulder_center(self) -> np.ndarray:

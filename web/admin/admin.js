@@ -249,6 +249,8 @@ function renderServerInfo(s) {
   const t = s.thresholds;
   const rows = [
     ['자세 추정', s.pose_backend],
+    ['낙상 감지', s.detection_backend === 'random_forest'
+      ? `Random Forest (점수 기준 ${s.rf_threshold})` : '규칙 기반 (하강 속도·누운 자세)'],
     ['음성 인식', s.stt_backend],
     ['웹 푸시', s.push_enabled ? '켜짐' : '꺼짐 (VAPID 키 없음)'],
     ['연결', s.https ? 'HTTPS' : 'HTTP (시험용, 휴대폰 카메라·푸시 안 됨)'],
@@ -335,7 +337,9 @@ const FSM_LABELS = {
 const FSM_CLASSES = { NORMAL: 'badge-normal', FALLING: 'badge-falling', SUSPECT: 'badge-suspect', ALARM: 'badge-alarm' };
 const OVERLAY_COLORS = { NORMAL: '#2ecc71', FALLING: '#ff9800', SUSPECT: '#ffd600', ALARM: '#ff1744' };
 const POSTURE_LABELS = { lying: '누움', standing: '서 있음', between: '중간 (서지도 눕지도 않음)' };
-// 최근 15초 그래프: 특징값과 그 판정 기준선
+// 최근 15초 그래프: 특징값과 그 판정 기준선. Random Forest 모드에서는 분석 점수 그래프를 맨 위에 더한다.
+const RF_CHART = { key: 'probability', label: 'Random Forest 분석 점수', min: 0, max: 1, fromHistory: true,
+  lines: (t) => [{ v: t.rf_threshold, name: '의심' }] };
 const LIVE_CHARTS = [
   { key: 'descent_velocity', label: '하강 속도 (몸통 길이/초)', min: -1,
     lines: (t) => [{ v: t.descent_velocity_peak, name: '하강' }] },
@@ -534,7 +538,9 @@ function drawOverlay(ctx, data) {
     ctx.fill();
   }
   const f = data.features || {};
-  const text = `${FSM_LABELS[data.state] || data.state} · 각도 ${f.torso_angle}° · 종횡비 ${f.aspect_ratio} · 하강 ${f.descent_velocity}`;
+  const score = data.detector === 'random_forest'
+    ? ` · 점수 ${data.probability === null ? '대기' : `${Math.round(data.probability * 100)}%`}` : '';
+  const text = `${FSM_LABELS[data.state] || data.state}${score} · 각도 ${f.torso_angle}° · 종횡비 ${f.aspect_ratio} · 하강 ${f.descent_velocity}`;
   drawLabel(ctx, text, x0, Math.max(0, y0 - 22 * s), s);
 }
 
@@ -543,7 +549,16 @@ function renderLiveSide(data) {
   const t = data.thresholds;
   const fsm = data.fsm;
   const num = (v, unit = '') => (v === null || v === undefined ? '-' : `${v}${unit}`);
-  const rows = [
+  const rf = data.detector === 'random_forest';
+  const rows = rf ? [
+    ['감지 방식', 'Random Forest (최근 1.5초 움직임)'],
+    ['분석 점수 / 기준', data.probability === null ? '분석 대기 (기록을 모으는 중)'
+      : `${Math.round(data.probability * 100)}% / ${Math.round(t.rf_threshold * 100)}%`],
+    ['사람', data.person_detected ? `감지 (신뢰도 ${data.keypoints ? data.keypoints.confidence : '-'})` : '없음'],
+    ['자세 (참고)', POSTURE_LABELS[data.posture] || '-'],
+    ['처리 / 버린 프레임', `${data.frames_processed} / ${data.frames_dropped}`],
+  ] : [
+    ['감지 방식', '규칙 기반 (하강 속도·누운 자세)'],
     ['사람', data.person_detected ? `감지 (신뢰도 ${data.keypoints ? data.keypoints.confidence : '-'})` : '없음'],
     ['자세', POSTURE_LABELS[data.posture] || '-'],
     ['감지 상태 유지', num(fsm.state_for, '초')],
@@ -551,12 +566,14 @@ function renderLiveSide(data) {
       : `${fsm.lying_for}초 / ${t.t1_lying_seconds}초 (${t.lying_gap_seconds}초 이하 끊김은 이어서 잼)`],
     ['처리 / 버린 프레임', `${data.frames_processed} / ${data.frames_dropped}`],
   ];
-  const lyingFor = fsm.lying_for || 0;
+  // 막대: Random Forest는 점수(기준을 넘으면 의심 쪽), 규칙 기반은 누운 시간/T1
+  const meterValue = rf ? (data.probability || 0) : (fsm.lying_for || 0);
+  const meterMax = rf ? 1 : t.t1_lying_seconds;
   const fill = el('div', { class: 'meter-fill' });
-  fill.style.width = `${Math.min(100, (100 * lyingFor) / t.t1_lying_seconds)}%`;
+  fill.style.width = `${Math.min(100, (100 * meterValue) / meterMax)}%`;
   const meter = el('div', {
-    class: 'meter', role: 'progressbar', 'aria-label': '누운 자세 유지 시간',
-    'aria-valuemin': 0, 'aria-valuemax': t.t1_lying_seconds, 'aria-valuenow': lyingFor,
+    class: 'meter', role: 'progressbar', 'aria-label': rf ? 'Random Forest 분석 점수' : '누운 자세 유지 시간',
+    'aria-valuemin': 0, 'aria-valuemax': meterMax, 'aria-valuenow': meterValue,
   }, [fill]);
   $('#live-state').replaceChildren(
     el('div', { class: 'live-badges' }, [
@@ -576,13 +593,20 @@ function renderLiveSide(data) {
       Boolean(f) && f.aspect_ratio >= t.aspect_ratio_lying],
     ['움직임량', f ? f.motion_quantity : null, '기록용 (판정에 쓰지 않음)', false],
   ];
+  if (rf) {
+    // Random Forest 모드에서 규칙 기반 기준은 판정에 쓰지 않는다. 비교용으로만 남긴다.
+    for (const row of featureRows) { row[2] = `참고: ${row[2]}`; row[3] = false; }
+    featureRows.unshift(['분석 점수', data.probability === null ? null : data.probability.toFixed(3),
+      `${t.rf_threshold} 초과가 1.2초 동안 절반 이상이면 의심`,
+      data.probability !== null && data.probability > t.rf_threshold]);
+  }
   fillTable($('#live-features'), featureRows.map(([k, v, c, hit]) => el('tr', { class: hit ? 'is-hit' : '' }, [
     td(k), td(v, 'num'), td(c),
   ])), '-');
-  renderLiveCharts(data.history, t);
+  renderLiveCharts(data.history, t, rf);
 }
 
-function renderLiveCharts(history, thresholds) {
+function renderLiveCharts(history, thresholds, rf = false) {
   const box = $('#live-charts');
   if (!history.length) {
     box.replaceChildren();
@@ -593,9 +617,12 @@ function renderLiveCharts(history, thresholds) {
   const tEnd = history[history.length - 1].t;
   const tStart = tEnd - LIVE_HISTORY_SECONDS;
   const x = (t) => ((t - tStart) / LIVE_HISTORY_SECONDS) * W;
-  box.replaceChildren(...LIVE_CHARTS.map((c) => {
+  box.replaceChildren(...(rf ? [RF_CHART, ...LIVE_CHARTS] : LIVE_CHARTS).map((c) => {
     const lines = c.lines(thresholds);
-    const values = history.map((h) => (h.features ? h.features[c.key] : null));
+    const values = history.map((h) => {
+      const v = c.fromHistory ? h[c.key] : (h.features ? h.features[c.key] : null);
+      return v === undefined ? null : v;
+    });
     const present = values.filter((v) => v !== null);
     const min = c.min;
     const max = c.max !== undefined ? c.max : Math.max(...lines.map((l) => l.v * 1.5), ...present, min + 0.1);

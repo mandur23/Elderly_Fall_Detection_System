@@ -493,6 +493,8 @@ async def overview(request: Request):
     return {
         "server": {
             "pose_backend": settings.pose_backend,
+            "detection_backend": state.devices.detector_name,
+            "rf_threshold": settings.rf_threshold,
             "stt_backend": settings.stt_backend,
             "push_enabled": state.push.enabled,
             "https": settings.https_enabled,
@@ -536,6 +538,7 @@ def _detection_thresholds(settings) -> Dict[str, float]:
         "torso_angle_standing": settings.torso_angle_standing,
         "aspect_ratio_standing": settings.aspect_ratio_standing,
         "camera_stale_seconds": settings.camera_stale_seconds,
+        "rf_threshold": settings.rf_threshold,
     }
 
 

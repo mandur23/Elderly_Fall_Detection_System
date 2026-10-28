@@ -5,8 +5,11 @@
     python -m server.replay_video 넘어짐.mp4 --fps 5 --raw  # 초당 5장, YOLO 원시 신뢰도도 출력
 
 영상을 휴대폰 카메라 화면(web/static/js/camera.js)과 같은 조건, 곧 긴 변 640px·JPEG 품질 0.7·초당 10장으로
-바꿔 서버가 쓰는 자세 추정(YOLO-Pose), 특징 계산, 낙상 FSM에 그대로 넣고 프레임마다 결과를 출력한다.
-판정 기준값은 서버와 같은 설정(server/config.py, FALL_* 환경변수)을 쓴다. 예: FALL_T1_SECONDS=1.5
+바꿔 서버가 쓰는 자세 추정(YOLO-Pose)과 낙상 감지기에 그대로 넣고 프레임마다 결과를 출력한다.
+감지 방식과 기준값은 서버와 같은 설정(server/config.py, FALL_* 환경변수)을 쓴다.
+    기본(Random Forest): 분석 점수와 상태.   FALL_RF_THRESHOLD=0.5 처럼 기준을 바꿀 수 있다.
+    FALL_DETECTION_BACKEND=fsm: 규칙 기반 FSM(하강 속도·누운 자세).   예: FALL_T1_SECONDS=1.5
+특징값(하강 속도·각도·종횡비)은 두 방식 모두 참고로 출력한다.
 
 시각은 영상 안의 시각을 쓴다. 실제 서버는 '받은 시각'을 쓰고 분석이 밀리면 프레임을 버리므로, 느린 PC에서는
 결과가 조금 다를 수 있다.
@@ -20,6 +23,7 @@ import numpy as np
 
 from server.config import Settings
 from server.detection import FallFSM, FeatureExtractor, create_pose_estimator
+from server.devices import DeviceHub
 
 FRAME_LONG_SIDE = 640   # camera.js와 같은 값
 JPEG_QUALITY = 70
@@ -93,41 +97,59 @@ def main(argv=None) -> int:
         return 1
     pose = create_pose_estimator(settings)
     extractor = FeatureExtractor()
-    fsm = FallFSM.from_settings(settings)
+    rules = FallFSM.from_settings(settings)   # 자세 표시(참고)와 FSM 모드의 판정
+    # 서버와 똑같이 감지기를 고른다: DeviceHub가 Random Forest 모델을 불러오고 검사한다.
+    hub = DeviceHub(settings, accounts=None, guardian_hub=None, pose=pose)
+    if hub.rf_model is not None:
+        from server.detection.random_forest import RandomForestDetector
+        detector = RandomForestDetector(hub.rf_model, settings.rf_threshold)
+    else:
+        detector = rules
+    rf = hub.rf_model is not None
     frames = sample_frames(args.video, args.fps, args.hold)
 
     print(f"영상 {args.video}: {len(frames)}장 (초당 {args.fps:g}장" + (f", 끝에 {args.hold:g}초 더" if args.hold else "") + ")")
-    print(f"기준: 하강 속도 {fsm.descent_peak} 이상 -> 하강, 누움(각도 {fsm.angle_lying}° 이상 또는 종횡비 {fsm.aspect_lying} 이상)이 "
-          f"T1 {fsm.t1}초 유지 -> 의심 ({fsm.lying_gap}초 이하 끊김은 이어서 잼), "
-          f"서 있음(각도 {fsm.angle_standing}° 미만이고 종횡비 {fsm.aspect_standing} 미만) -> 정상")
-    print("  시각  하강속도  각도   종횡비  자세      상태      누운시간")
+    if rf:
+        print(f"감지 방식: Random Forest ({settings.rf_model_path}). 점수가 {settings.rf_threshold}를 넘는 판정이 "
+              "최근 1.2초 동안 절반 이상(3회 이상)이면 의심. 특징값·자세는 참고")
+        print("  시각  하강속도  각도   종횡비  자세      상태      점수")
+    else:
+        print(f"감지 방식: 규칙 기반. 하강 속도 {rules.descent_peak} 이상 -> 하강, 누움(각도 {rules.angle_lying}° 이상 또는 "
+              f"종횡비 {rules.aspect_lying} 이상)이 T1 {rules.t1}초 유지 -> 의심 ({rules.lying_gap}초 이하 끊김은 이어서 잼), "
+              f"서 있음(각도 {rules.angle_standing}° 미만이고 종횡비 {rules.aspect_standing} 미만) -> 정상")
+        print("  시각  하강속도  각도   종횡비  자세      상태      누운시간")
     suspect_at = None
     fall_at = None
     for t, jpg in frames:
         keypoints = pose.estimate(jpg)
         features = extractor.extract(keypoints, t) if keypoints is not None else None
-        before = fsm.state
-        state = fsm.update(features, t)
+        before = detector.state
+        state = detector.update(keypoints if rf else features, t)
         if features is None:
             posture, values = "-", "사람 없음".ljust(22)
         else:
-            posture = "누움" if fsm.is_lying(features) else "서 있음" if fsm.is_standing(features) else "중간"
+            posture = "누움" if rules.is_lying(features) else "서 있음" if rules.is_standing(features) else "중간"
             values = (f"{features['descent_velocity']:7.2f} {features['torso_angle']:6.1f}° "
                       f"{features['aspect_ratio']:6.2f}")
-        lying = f"{t - fsm.lying_since:.1f}초" if fsm.lying_since is not None else "-"
+        if rf:
+            last = "대기" if detector.probability is None else f"{detector.probability:.2f}"
+        else:
+            last = f"{t - rules.lying_since:.1f}초" if rules.lying_since is not None else "-"
         change = f"  <== {before.value} -> {state.value}" if state != before else ""
         extra = raw_scores(pose, jpg) if args.raw else ""
-        print(f"{t:6.2f}s {values}  {posture:6} {state.value:8} {lying:6}{extra}{change}")
+        print(f"{t:6.2f}s {values}  {posture:6} {state.value:8} {last:6}{extra}{change}")
         if state.value == "FALLING" and fall_at is None:
             fall_at = t
         if state.value == "SUSPECT" and suspect_at is None:
             suspect_at = t
     print()
     if suspect_at is not None:
-        print(f"결과: {suspect_at:.2f}초에 낙상 의심 (하강 감지 {fall_at:.2f}초)")
+        print(f"결과: {suspect_at:.2f}초에 낙상 의심" + (f" (하강 감지 {fall_at:.2f}초)" if fall_at is not None else ""))
+    elif rf:
+        print("결과: 영상이 끝날 때까지 낙상 의심 판정이 나오지 않음. 더 누워 있는 상황은 --hold로 시험할 수 있습니다.")
     elif fall_at is not None:
-        print(f"결과: {fall_at:.2f}초에 하강을 감지했지만 영상이 끝날 때까지 누운 자세가 T1({fsm.t1}초)을 채우지 못함 "
-              f"(마지막 상태 {fsm.state.value}). 더 누워 있는 상황은 --hold로 시험할 수 있습니다.")
+        print(f"결과: {fall_at:.2f}초에 하강을 감지했지만 영상이 끝날 때까지 누운 자세가 T1({rules.t1}초)을 채우지 못함 "
+              f"(마지막 상태 {rules.state.value}). 더 누워 있는 상황은 --hold로 시험할 수 있습니다.")
     else:
         print("결과: 하강을 감지하지 못함")
     return 0

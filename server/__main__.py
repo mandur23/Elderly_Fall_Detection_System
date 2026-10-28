@@ -31,10 +31,28 @@ class HideDeviceKeys(logging.Filter):
         return True
 
 
+class HideClientResets(logging.Filter):
+    """Windows에서 브라우저가 연결을 먼저 끊을 때 asyncio가 남기는 트레이스백을 감춘다.
+
+    Windows의 기본 이벤트 루프(Proactor)는 이미 끊긴 소켓을 정리하며 shutdown()을 부르다
+    ConnectionResetError(WinError 10054)를 만나면 'Exception in callback
+    _ProactorBasePipeTransport._call_connection_lost' 오류를 로그에 남긴다. 요청 처리와 무관하고
+    (휴대폰 화면 새로 고침, 탭 닫기 등) 오류처럼 보여 혼란스러우므로 이 경우만 걸러 낸다.
+    다른 asyncio 오류는 그대로 남긴다.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        exc = record.exc_info[1] if record.exc_info else None
+        if isinstance(exc, ConnectionResetError) and "_call_connection_lost" in str(record.msg):
+            return False
+        return True
+
+
 def install_log_filters() -> None:
     # 일반 요청은 uvicorn.access, WebSocket 접속은 uvicorn.error 로거로 남는다.
     for name in ("uvicorn.access", "uvicorn.error"):
         logging.getLogger(name).addFilter(HideDeviceKeys())
+    logging.getLogger("asyncio").addFilter(HideClientResets())
 
 
 def main() -> None:

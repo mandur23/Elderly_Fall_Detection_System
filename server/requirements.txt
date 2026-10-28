@@ -14,3 +14,7 @@ faster-whisper>=1.0     # 음성 인식
 # 개발·테스트 (서버 실행에는 필요 없음)
 httpx>=0.27
 pytest>=8.0
+
+# 42차원 시계열 낙상 분류기
+scikit-learn==1.9.0
+joblib>=1.3

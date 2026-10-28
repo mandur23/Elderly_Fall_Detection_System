@@ -121,7 +121,7 @@ FALL_POSE_BACKEND=fake FALL_STT_BACKEND=fake FALL_COOKIE_SECURE=0 python -m serv
 
 **시험 결과 정리(CSV).** 이벤트·통계 탭의 `CSV 다운로드`는 지금 걸어 둔 필터 그대로 이벤트를 내려받습니다. 엑셀에서 한글이 깨지지 않게 UTF-8 BOM을 붙이고, 판정·음성 결과·검토 라벨·메모·채널별 알림 수·판정 특징값(하강 속도 등)이 들어 있습니다. 시험마다 라벨과 메모를 단 뒤 내려받아 [docs/TEST_PLAN.md](../docs/TEST_PLAN.md)의 기록에 씁니다. `=`, `+`, `-`, `@`로 시작하는 글은 엑셀이 수식으로 실행하지 않게 앞에 `'`를 붙입니다.
 
-**녹화 영상으로 판정 시험.** 넘어지는 영상을 휴대폰 카메라 화면과 같은 조건(긴 변 640px, JPEG 0.7, 초당 10장)으로 바꿔 서버와 같은 YOLO-Pose·특징 계산·FSM에 넣고 프레임마다 특징값과 상태를 출력합니다. 영상이 누운 직후 끝나면 `--hold 2`로 마지막 장면을 더 넣고, 사람이 없다고 나오는 이유는 `--raw`(어깨·엉덩이 신뢰도)로 봅니다.
+**녹화 영상으로 판정 시험.** 넘어지는 영상을 휴대폰 카메라 화면과 같은 조건(긴 변 640px, JPEG 0.7, 초당 10장)으로 바꿔 서버와 같은 YOLO-Pose와 감지기(기본 Random Forest, `FALL_DETECTION_BACKEND=fsm`이면 규칙 기반)에 넣고 프레임마다 특징값·점수·상태를 출력합니다. 영상이 누운 직후 끝나면 `--hold 2`로 마지막 장면을 더 넣고, 사람이 없다고 나오는 이유는 `--raw`(어깨·엉덩이 신뢰도)로 봅니다.
 
 ```bash
 .venv\Scripts\python.exe -m server.replay_video 넘어짐.mp4 --hold 2
@@ -139,10 +139,13 @@ FALL_POSE_BACKEND=fake FALL_STT_BACKEND=fake FALL_COOKIE_SECURE=0 python -m serv
 | `FALL_DATA_DIR` | `data/` | DB(`server.db`) 위치 |
 | `FALL_WEB_DIR` | `web/` | 웹페이지 폴더 |
 | `FALL_POSE_BACKEND` | `yolo` | `fake`는 테스트 전용 |
-| `FALL_YOLO_MODEL` | `yolov8n-pose.pt` | YOLO 모델 파일 |
+| `FALL_YOLO_MODEL` | `models/yolov8n-pose.pt` | YOLO 모델 파일 |
+| `FALL_DETECTION_BACKEND` | `random_forest` | 낙상 감지 방식. `fsm`이면 규칙 기반(하강 속도·누운 자세). 가짜 자세 추정(시험)은 늘 `fsm` ([docs/RANDOM_FOREST.md](../docs/RANDOM_FOREST.md)) |
+| `FALL_RF_MODEL` | `models/fall_detector_window_yolo.pkl` | Random Forest 모델(42차원). 불러올 때 코드가 실행될 수 있으므로 직접 만든 파일만 씁니다 |
+| `FALL_RF_THRESHOLD` | `0.40` | Random Forest 분석 점수 기준 |
 | `FALL_STT_BACKEND` | `whisper` | `fake`는 테스트 전용 |
 | `FALL_WHISPER_MODEL` | `small` | `base`, `small`, `medium` 등. 클수록 정확하지만 느림 |
-| `FALL_DESCENT_PEAK` | `2.0` | 하강 속도 기준(몸통 길이/초) |
+| `FALL_DESCENT_PEAK` | `2.0` | 하강 속도 기준(몸통 길이/초). 아래 FSM 값은 `FALL_DETECTION_BACKEND=fsm`일 때 씁니다 |
 | `FALL_T1_SECONDS` | `2.0` | 하강 뒤 누운 자세가 이어져야 하는 시간. 사이에 '사람 없음'·'중간 자세'가 1초 이하로 끼는 것(뒤척임, 몸 일부가 화면 밖)은 이어서 잽니다(`config.py`의 `lying_gap_seconds`) |
 | `FALL_VOICE_TIMEOUT` | `20` | 음성 확인 요청 후 녹음을 기다리는 시간(초) |
 | `FALL_VAPID_PRIVATE_KEY`, `FALL_VAPID_PUBLIC_KEY`, `FALL_VAPID_SUBJECT` | 없음 | 웹 푸시. 없으면 푸시 없이 보호자 화면 알림만 동작 |

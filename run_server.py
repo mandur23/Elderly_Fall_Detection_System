@@ -4,6 +4,8 @@
     python run_server.py              # 실제 모델(YOLO-Pose, Whisper)로 실행
     python run_server.py --fake       # 장비·모델 없이 가짜 자세 추정·가짜 음성 인식으로 실행
     python run_server.py --make-cert  # 휴대폰용 HTTPS 인증서를 다시 만든 뒤 실행 (mkcert 필요)
+    python run_server.py --local      # 이 PC에서만 접속(https://localhost:8443). 휴대폰·Pi는 접속할 수 없음
+    python run_server.py --local --http  # 이 PC에서 HTTP로(http://localhost:8443). localhost는 HTTP여도 카메라가 된다
 
 실행하면 다음을 알아서 한다.
 1. 필요한 패키지가 있는지 확인한다. --auto면 가상환경에 설치하고, mkcert·인증서·방화벽까지
@@ -38,7 +40,7 @@ ROOT = Path(__file__).resolve().parent
 REQUIRED = {"fastapi": "fastapi", "uvicorn": "uvicorn", "multipart": "python-multipart", "bcrypt": "bcrypt",
             "pywebpush": "pywebpush", "numpy": "numpy", "cv2": "opencv-python-headless"}
 # 실제 모델. --fake면 없어도 된다.
-MODELS = {"ultralytics": "ultralytics", "faster_whisper": "faster-whisper"}
+MODELS = {"ultralytics": "ultralytics", "faster_whisper": "faster-whisper", "sklearn": "scikit-learn", "joblib": "joblib"}
 
 
 def say(message: str = "") -> None:
@@ -113,7 +115,20 @@ def main() -> int:
                         help="패키지 설치, mkcert·인증서, 방화벽까지 자동으로 준비(run_server.bat이 사용)")
     parser.add_argument("--port", type=int, default=int(os.getenv("FALL_PORT", "8443")))
     parser.add_argument("--no-browser", action="store_true", help="관리자 화면을 자동으로 열지 않음")
+    parser.add_argument("--http", action="store_true",
+                        help="HTTPS 인증서 없이 HTTP로 실행. 휴대폰은 HTTP에서 카메라·마이크·푸시를 못 쓰므로 --local과 함께 쓴다")
+    parser.add_argument("--local", action="store_true",
+                        help="이 PC에서만 접속(localhost, FALL_HOST=127.0.0.1). 휴대폰·Pi는 접속할 수 없음")
     args = parser.parse_args()
+    use_http = args.http
+    if args.local:
+        os.environ["FALL_HOST"] = "127.0.0.1"
+    if use_http:
+        # 인증서를 쓰지 않는다. 환경변수로 준 인증서도 끈다.
+        os.environ.pop("FALL_SSL_CERT", None)
+        os.environ.pop("FALL_SSL_KEY", None)
+    # 서버가 듣는 주소(server/config.py의 FALL_HOST). 루프백이면 같은 Wi-Fi의 휴대폰·Pi는 접속할 수 없다.
+    local_only = os.getenv("FALL_HOST", "0.0.0.0").strip("[]") in ("127.0.0.1", "localhost", "::1")
 
     if not (3, 10) <= sys.version_info[:2] <= (3, 13):
         say(f"Python 3.10~3.13이 필요합니다(지금은 {sys.version.split()[0]}). "
@@ -130,9 +145,10 @@ def main() -> int:
     data_dir.mkdir(parents=True, exist_ok=True)
     ip = lan_ip()
     if args.auto:
-        if not os.getenv("FALL_SSL_CERT"):
+        if not os.getenv("FALL_SSL_CERT") and not use_http:
             auto_setup.ensure_cert(data_dir, ip)
-        auto_setup.ensure_firewall(args.port)
+        if not local_only:   # 이 PC에서만 접속하면 방화벽을 열 필요가 없다
+            auto_setup.ensure_firewall(args.port)
     os.environ["FALL_PORT"] = str(args.port)
     if args.fake:
         os.environ["FALL_POSE_BACKEND"] = "fake"
@@ -141,7 +157,7 @@ def main() -> int:
     if args.make_cert and not auto_setup.make_cert(data_dir, ip):
         return 1
     cert, key = data_dir / "cert.pem", data_dir / "key.pem"
-    if not os.getenv("FALL_SSL_CERT") and cert.exists() and key.exists():
+    if not use_http and not os.getenv("FALL_SSL_CERT") and cert.exists() and key.exists():
         os.environ["FALL_SSL_CERT"], os.environ["FALL_SSL_KEY"] = str(cert), str(key)
     https = bool(os.getenv("FALL_SSL_CERT") and os.getenv("FALL_SSL_KEY"))
     if not https:
@@ -156,12 +172,19 @@ def main() -> int:
     say(" 낙상 감지 중앙 서버")
     say(f"  모드        : {'가짜 모델(시험용)' if args.fake else '실제 모델(YOLO-Pose, Whisper)'}")
     say(f"  관리자 화면 : {admin_url}   (이 PC에서만 열림)")
-    say(f"  휴대폰 접속 : {phone_url}   (같은 Wi-Fi·핫스팟)")
-    say(f"  Pi 설정     : PI_SERVER_URL={phone_url}")
-    if not https:
+    if local_only:
+        say(f"  접속 주소   : {scheme}://localhost:{args.port}   (이 PC에서만. 휴대폰·Pi는 접속할 수 없음)")
+    else:
+        say(f"  휴대폰 접속 : {phone_url}   (같은 Wi-Fi·핫스팟)")
+        say(f"  Pi 설정     : PI_SERVER_URL={phone_url}")
+    if not https and local_only:
+        say("  HTTP로 실행합니다. localhost는 HTTP에서도 카메라·마이크를 쓸 수 있습니다.")
+    elif not https and use_http:
+        say("  ! HTTP로 실행합니다. 휴대폰은 HTTP 주소에서 카메라·마이크·웹 푸시를 쓸 수 없습니다.")
+    elif not https:
         say("  ! HTTPS 인증서가 없습니다. 휴대폰 카메라·마이크·웹 푸시가 동작하지 않습니다.")
         say("    run_server.bat(또는 python run_server.py --auto)으로 실행하면 인증서를 자동으로 만듭니다.")
-    elif ip != "127.0.0.1" and not auto_setup.cert_covers(Path(os.environ["FALL_SSL_CERT"]), ip):
+    elif not local_only and ip != "127.0.0.1" and not auto_setup.cert_covers(Path(os.environ["FALL_SSL_CERT"]), ip):
         say(f"  ! 인증서에 지금 주소({ip})가 없습니다. 휴대폰에 경고가 뜨면 --make-cert로 다시 만드세요.")
     say("  끄려면 이 창에서 Ctrl+C")
     say("=" * 64)

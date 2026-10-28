@@ -463,6 +463,30 @@ def test_device_live_view_shows_frame_keypoints_and_detection(family):
     assert admin_client(family.main, client=REMOTE).get(url).status_code == 404
 
 
+def test_device_live_view_with_random_forest_detector(family):
+    """Random Forest 감지기를 쓰는 기기도 실시간 보기가 열린다(규칙 기반 FSM 전용 값은 비어 있음)."""
+    class Model:
+        classes_ = [0, 1]
+
+        def predict_proba(self, values):
+            return [[0.3, 0.7]]
+
+    hub = family.app.state.devices
+    hub.rf_model = Model()   # 실제로는 YOLO 자세 추정일 때 모델 파일을 불러온다
+    url = f"/admin/api/devices/{family.device_id}/live"
+    with camera(family.main, family.device_id, family.key) as ws:
+        open_camera(ws)
+        ws.send_bytes(fake_frame("standing"))
+        wait_until(lambda: family.device_id in hub.sessions and hub.sessions[family.device_id].frame_seq >= 1)
+        body = family.admin.get(url).json()
+    assert body["detector"] == "random_forest" and body["thresholds"]["rf_threshold"] == 0.4
+    # 가짜 추정기의 관절에는 프레임 크기가 없어 Random Forest는 분석을 기다린다
+    assert body["probability"] is None and body["fsm"]["state"] == "NORMAL"
+    assert body["fsm"]["state_for"] is None and body["fsm"]["lying_for"] is None
+    assert body["posture"] == "standing" and body["history"][-1]["probability"] is None
+    assert family.admin.get("/admin/api/overview").json()["server"]["detection_backend"] == "random_forest"
+
+
 def test_users_list_search_and_detail(family):
     pending = signup(family.main, "daughter@example.com", "딸_100%")
     pending.post("/api/guardians", json={"email": family.owner.user["email"]})  # 딸이 할머니를 보호자로 요청(수락 전)

@@ -105,6 +105,7 @@ class DeviceSession:
     person_detected: bool = False
     features: Optional[Dict[str, float]] = None
     closed: bool = False
+    last_analysis_sent: float = 0.0
     frames_processed: int = 0
     frames_dropped: int = 0
     frame_times: Deque[float] = field(default_factory=lambda: deque(maxlen=60))
@@ -140,7 +141,21 @@ class DeviceHub:
         self.accounts = accounts
         self.guardian_hub = guardian_hub
         self.pose = pose
+        self.rf_model = None
+        if settings.detection_backend == "random_forest" and pose.name == "yolo":
+            import joblib
+            bundle = joblib.load(settings.rf_model_path)
+            self.rf_model = bundle["model"] if isinstance(bundle, dict) else bundle
+            # 동시 기기 처리 시 프레임마다 스레드를 과도하게 만들지 않는다.
+            if hasattr(self.rf_model, "n_jobs"):
+                self.rf_model.n_jobs = 1
+            if getattr(self.rf_model, "n_features_in_", 42) != 42 or 1 not in self.rf_model.classes_:
+                raise ValueError("Random Forest 모델은 낙상 클래스와 42개 특징이 필요합니다")
+        elif settings.detection_backend not in ("random_forest", "fsm"):
+            raise ValueError("알 수 없는 감지 방식: " + settings.detection_backend)
         self.clock = clock
+        # 관리자 실시간 보기의 '자세' 표시용 규칙(서 있음·누움 기준). Random Forest 모드에서도 참고로 보여 준다.
+        self._posture_rules = FallFSM.from_settings(settings)
         self.events: Any = None
         self.sessions: Dict[int, DeviceSession] = {}
         self.background = BackgroundTasks("devices")
@@ -177,6 +192,9 @@ class DeviceHub:
             owner_name=owner["name"] if owner else None,
             connected_at=self.clock(),
         )
+        if self.rf_model is not None:
+            from server.detection.random_forest import RandomForestDetector
+            session.fsm = RandomForestDetector(self.rf_model, self.settings.rf_threshold)
         old = self.sessions.get(device["id"])
         self.sessions[device["id"]] = session
         if old is not None:
@@ -307,10 +325,25 @@ class DeviceHub:
             session.frame_seq += 1
 
             previous_state = session.fsm.state
-            state = session.fsm.update(features, t)
+            if self.rf_model is not None:
+                state = session.fsm.update(keypoints, t)
+                if session.device.get("kind") == "phone" and t - session.last_analysis_sent >= 0.3:
+                    session.last_analysis_sent = t
+                    points = []
+                    bbox = None
+                    if keypoints is not None and keypoints.image_width and keypoints.image_height:
+                        points = [[float(x/keypoints.image_width), float(y/keypoints.image_height)] for x,y in
+                                  (keypoints.left_shoulder, keypoints.right_shoulder, keypoints.left_hip, keypoints.right_hip)]
+                        x0, y0, x1, y1 = keypoints.bbox
+                        bbox = [x0/keypoints.image_width, y0/keypoints.image_height, x1/keypoints.image_width, y1/keypoints.image_height]
+                    self.background.spawn(self.send(session.device_id, {"type":"analysis", "probability":session.fsm.probability,
+                                                                     "points":points, "bbox":bbox, "state":state.value, "threshold":self.settings.rf_threshold}))
+            else:
+                state = session.fsm.update(features, t)
             if state != previous_state:
                 log.info("기기 %s 감지 상태: %s -> %s", session.device_id, previous_state.value, state.value)
-            session.history.append({"t": round(t, 3), "state": state.value, "features": features})
+            session.history.append({"t": round(t, 3), "state": state.value, "features": features,
+                                    "probability": getattr(session.fsm, "probability", None)})
             if state == FallState.SUSPECT and previous_state != FallState.SUSPECT and self.events is not None:
                 await self.events.on_suspect(session, session.fsm.suspect_features or features or {})
 
@@ -371,6 +404,11 @@ class DeviceHub:
             "state": self._state(device["id"], session),
         }
 
+    @property
+    def detector_name(self) -> str:
+        """실제로 쓰는 감지 방식. Random Forest는 YOLO 자세 추정일 때만 쓴다(가짜 추정기 시험은 FSM)."""
+        return "random_forest" if self.rf_model is not None else "fsm"
+
     def live_view(self, device_id: int) -> Optional[Dict[str, Any]]:
         """관리자 화면의 실시간 보기: 가장 최근 프레임과 그 장면의 관절·특징값·FSM 상태.
 
@@ -381,14 +419,18 @@ class DeviceHub:
             return None
         now = self.clock()
         fsm, features = session.fsm, session.features
+        rules = self._posture_rules
         if features is None:
             posture = None
-        elif fsm.is_lying(features):
+        elif rules.is_lying(features):
             posture = "lying"
-        elif fsm.is_standing(features):
+        elif rules.is_standing(features):
             posture = "standing"
         else:
             posture = "between"
+        # 규칙 기반 FSM만 상태 유지 시간·누운 시간을 잰다. Random Forest 감지기에는 없는 값이다.
+        state_since = getattr(fsm, "state_since", 0.0)
+        lying_since = getattr(fsm, "lying_since", None)
         return {
             "device_id": device_id,
             "seq": session.frame_seq,
@@ -400,11 +442,14 @@ class DeviceHub:
             "keypoints": session.last_keypoints,
             "features": features,
             "posture": posture,
+            "detector": self.detector_name,
+            # Random Forest의 최근 분석 점수(0~1). 기록이 모이기 전이거나 FSM 모드면 None
+            "probability": getattr(fsm, "probability", None),
             "fsm": {
                 "state": fsm.state.value,
                 # state_since는 첫 전이 전에는 0이라 그때는 알 수 없다
-                "state_for": round(now - fsm.state_since, 2) if fsm.state_since > 0 else None,
-                "lying_for": round(now - fsm.lying_since, 2) if fsm.lying_since is not None else None,
+                "state_for": round(now - state_since, 2) if state_since > 0 else None,
+                "lying_for": round(now - lying_since, 2) if lying_since is not None else None,
                 "suspect_features": fsm.suspect_features,
             },
             "event_state": self.events.state_for_device(device_id) if self.events is not None else None,

@@ -48,10 +48,13 @@ class Settings:
     # --- 자세 추정 ---
     # 'yolo' | 'fake'. 'fake'는 테스트 전용이며 프레임 바이트를 관절 좌표 JSON으로 읽는다.
     pose_backend: str = field(default_factory=lambda: _env("FALL_POSE_BACKEND", "yolo"))
-    yolo_model_path: str = field(default_factory=lambda: _env("FALL_YOLO_MODEL", "yolov8n-pose.pt"))
+    yolo_model_path: str = field(default_factory=lambda: _env("FALL_YOLO_MODEL", str(BASE_DIR / "models" / "yolov8n-pose.pt")))
     keypoint_min_confidence: float = 0.5
 
     # --- 낙상 판정 ---
+    detection_backend: str = field(default_factory=lambda: _env("FALL_DETECTION_BACKEND", "random_forest"))
+    rf_model_path: str = field(default_factory=lambda: _env("FALL_RF_MODEL", str(BASE_DIR / "models" / "fall_detector_window_yolo.pkl")))
+    rf_threshold: float = field(default_factory=lambda: _env_float("FALL_RF_THRESHOLD", 0.40))
     # 하강 속도 단위: 몸통 길이/초. 카메라와의 거리에 덜 민감하도록 몸통 길이로 정규화한다.
     descent_velocity_peak: float = field(default_factory=lambda: _env_float("FALL_DESCENT_PEAK", 2.0))
     torso_angle_lying: float = 60.0      # 수직선 대비 몸통 각도(도) 이상이면 누운 자세

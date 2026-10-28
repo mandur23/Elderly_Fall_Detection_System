@@ -382,9 +382,41 @@ function handleMessage(msg) {
     setDetail(`‘${msg.name || DEVICE_NAME}’(기기 ${msg.device_id})로 연결되었습니다.`);
   } else if (msg.type === 'state') {
     setServerState(msg.state, msg.event_id);
+  } else if (msg.type === 'analysis') {
+    drawAnalysis(msg);
   } else if (msg.type === 'voice_check') {
     handleVoiceCheck(msg);
   }
+}
+
+
+function drawAnalysis(msg) {
+  const layer = document.querySelector('#pose-overlay');
+  const video = document.querySelector('#preview');
+  const ctx = layer.getContext('2d');
+  const rect = layer.getBoundingClientRect();
+  layer.width = Math.max(1, Math.round(rect.width * devicePixelRatio));
+  layer.height = Math.max(1, Math.round(rect.height * devicePixelRatio));
+  const w = layer.width, h = layer.height;
+  const vw = video.videoWidth || 4, vh = video.videoHeight || 3;
+  const scale = Math.min(w/vw, h/vh), ox=(w-vw*scale)/2, oy=(h-vh*scale)/2;
+  const pts=(msg.points || []).map(p => [ox+p[0]*vw*scale, oy+p[1]*vh*scale]);
+  const high=msg.state === 'SUSPECT' || (msg.probability != null && msg.probability >= (msg.threshold ?? 0.4));
+  if (pts.length === 4) {
+    ctx.lineWidth=Math.max(3, w/200); ctx.strokeStyle=high?'#ff4545':'#38e8ff'; ctx.fillStyle=ctx.strokeStyle;
+    for (const [a,b] of [[0,1],[0,2],[1,3],[2,3]]) {ctx.beginPath();ctx.moveTo(...pts[a]);ctx.lineTo(...pts[b]);ctx.stroke();}
+    for (const pt of pts) {ctx.beginPath();ctx.arc(pt[0],pt[1],Math.max(4,w/120),0,2*Math.PI);ctx.fill();}
+    if (msg.bbox) {
+      const [x0,y0,x1,y1]=msg.bbox;
+      ctx.strokeStyle=high?'#ff4545':'#38e8ff'; ctx.lineWidth=Math.max(2,w/250);
+      ctx.strokeRect(ox+x0*vw*scale, oy+y0*vh*scale, (x1-x0)*vw*scale, (y1-y0)*vh*scale);
+    }
+  }
+  const score=document.querySelector('#rf-score'), progress=document.querySelector('#rf-progress');
+  const value=msg.probability == null ? null : Math.round(msg.probability*100);
+  score.textContent=value == null ? '분석 대기' : `${value}%`;
+  progress.value=value || 0;
+  document.querySelector('#rf-gauge').classList.toggle('is-high',high);
 }
 
 function setServerState(rawState, eventId) {
@@ -736,6 +768,7 @@ async function startDetection() {
  */
 function stopDetection({ message } = {}) {
   running = false;
+  drawAnalysis({points: [], probability: null});
   clearInterval(frameTimer);
   clearInterval(statusTimer);
   frameTimer = statusTimer = null;

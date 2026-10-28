@@ -1094,6 +1094,30 @@ def test_guardian_screen_closed_when_session_is_gone(family, monkeypatch):
         assert closed.value.code == 4401
 
 
+def test_asyncio_client_reset_traceback_is_hidden():
+    """Windows에서 브라우저가 먼저 끊을 때의 WinError 10054 트레이스백만 감추고 다른 asyncio 오류는 남긴다."""
+    import sys
+
+    from server.__main__ import HideClientResets
+
+    def record(msg, exc):
+        try:
+            raise exc
+        except Exception:
+            info = sys.exc_info()
+        return logging.LogRecord("asyncio", logging.ERROR, __file__, 1, msg, None, info)
+
+    reset = record("Exception in callback _ProactorBasePipeTransport._call_connection_lost(None)",
+                   ConnectionResetError(10054, "원격 호스트에 의해 강제로 끊겼습니다"))
+    other_callback = record("Exception in callback something_else()", ConnectionResetError())
+    other_error = record("Exception in callback _ProactorBasePipeTransport._call_connection_lost(None)",
+                         ValueError("bug"))
+    assert HideClientResets().filter(reset) is False
+    assert HideClientResets().filter(other_callback) is True
+    assert HideClientResets().filter(other_error) is True
+    assert HideClientResets().filter(logging.LogRecord("asyncio", logging.ERROR, __file__, 1, "x", None, None))
+
+
 def test_access_log_hides_device_key():
     """uvicorn 접속 로그에 ?key=...의 기기 키 원문이 남지 않는다."""
     import uvicorn
@@ -1122,3 +1146,6 @@ def test_access_log_hides_device_key():
         for logger in loggers:
             for f in [f for f in logger.filters if isinstance(f, HideDeviceKeys)]:
                 logger.removeFilter(f)
+        aio = logging.getLogger("asyncio")
+        for f in [f for f in aio.filters if type(f).__name__ == "HideClientResets"]:
+            aio.removeFilter(f)

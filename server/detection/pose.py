@@ -57,6 +57,7 @@ def keypoints_from(points: np.ndarray, conf: np.ndarray, min_conf: float) -> Opt
         bbox=(float(xmin), float(ymin), float(xmax), float(ymax)),
         all_points=visible,
         confidence=float(conf[core].mean()),
+        skeleton=[(float(p[0]), float(p[1])) if c >= min_conf else None for p, c in zip(points, conf)],
     )
 
 

@@ -6,7 +6,7 @@
 
 from collections import deque
 from dataclasses import dataclass
-from typing import Deque, Dict, Optional, Tuple
+from typing import Deque, Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -24,6 +24,9 @@ class Keypoints:
     confidence: float = 1.0
     image_width: int = 0
     image_height: int = 0
+    # COCO 17점 순서의 관절 좌표. 신뢰도 기준을 못 넘은 점은 None. 관리자 화면의 뼈대 선 그리기용이며
+    # 판정에는 쓰지 않는다. 17점을 모르는 추정기(가짜 추정기)는 None.
+    skeleton: Optional[List[Optional[Point]]] = None
 
     @property
     def shoulder_center(self) -> np.ndarray:

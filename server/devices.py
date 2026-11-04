@@ -55,6 +55,8 @@ def keypoints_view(kp: Optional[Keypoints]) -> Optional[Dict[str, Any]]:
         "shoulders": [point(kp.left_shoulder), point(kp.right_shoulder)],
         "hips": [point(kp.left_hip), point(kp.right_hip)],
         "points": [point(p) for p in kp.all_points],
+        # COCO 17점 순서, 신뢰도 기준 미만은 null. 뼈대 선을 이을 때 쓴다(17점을 모르는 추정기는 null).
+        "skeleton": None if kp.skeleton is None else [None if p is None else point(p) for p in kp.skeleton],
         "confidence": round(float(kp.confidence), 3),
     }
 

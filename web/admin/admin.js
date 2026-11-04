@@ -337,6 +337,13 @@ const FSM_LABELS = {
 const FSM_CLASSES = { NORMAL: 'badge-normal', FALLING: 'badge-falling', SUSPECT: 'badge-suspect', ALARM: 'badge-alarm' };
 const OVERLAY_COLORS = { NORMAL: '#2ecc71', FALLING: '#ff9800', SUSPECT: '#ffd600', ALARM: '#ff1744' };
 const POSTURE_LABELS = { lying: '누움', standing: '서 있음', between: '중간 (서지도 눕지도 않음)' };
+// 뼈대 선: COCO 17점(0 코, 1·2 눈, 3·4 귀, 5·6 어깨, 7·8 팔꿈치, 9·10 손목, 11·12 엉덩이, 13·14 무릎, 15·16 발목)을 잇는 쌍
+const SKELETON_EDGES = [
+  [0, 1], [0, 2], [1, 3], [2, 4], [3, 5], [4, 6],          // 얼굴
+  [5, 6], [5, 7], [7, 9], [6, 8], [8, 10],                 // 어깨·팔
+  [5, 11], [6, 12], [11, 12],                              // 몸통
+  [11, 13], [13, 15], [12, 14], [14, 16],                  // 다리
+];
 // 최근 15초 그래프: 특징값과 그 판정 기준선. Random Forest 모드에서는 분석 점수 그래프를 맨 위에 더한다.
 const RF_CHART = { key: 'probability', label: 'Random Forest 분석 점수', min: 0, max: 1, fromHistory: true,
   lines: (t) => [{ v: t.rf_threshold, name: '의심' }] };
@@ -514,6 +521,20 @@ function drawOverlay(ctx, data) {
   ctx.lineWidth = 2 * s;
   ctx.strokeStyle = color;
   ctx.strokeRect(x0, y0, x1 - x0, y1 - y0);
+  // 뼈대 선: 양 끝 관절이 모두 신뢰도 기준을 넘은 쌍만 잇는다
+  if (Array.isArray(kp.skeleton)) {
+    ctx.strokeStyle = 'rgba(77, 208, 225, 0.85)';
+    ctx.lineWidth = 2 * s;
+    ctx.lineCap = 'round';
+    for (const [a, b] of SKELETON_EDGES) {
+      const p = kp.skeleton[a], q = kp.skeleton[b];
+      if (!p || !q) continue;
+      ctx.beginPath();
+      ctx.moveTo(p[0], p[1]);
+      ctx.lineTo(q[0], q[1]);
+      ctx.stroke();
+    }
+  }
   // 관절 점
   ctx.fillStyle = '#4dd0e1';
   for (const [x, y] of kp.points) {

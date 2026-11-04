@@ -442,6 +442,9 @@ def test_yolo_bbox_uses_only_confident_points(monkeypatch):
     _install_fake_ultralytics(monkeypatch, [(pts, conf)], box_conf=[0.9])
     k = YoloPoseEstimator("m.pt", 0.5).estimate(_jpeg())
     assert k.bbox[0] > 0 and k.all_points.shape == (16, 2)
+    # 뼈대 선용 17점: 순서를 지키고 신뢰도가 낮은 점만 None
+    assert len(k.skeleton) == 17 and k.skeleton[0] is None
+    assert k.skeleton[5] == k.left_shoulder and k.skeleton[12] == k.right_hip
 
 
 def test_yolo_no_person_and_bad_jpeg(monkeypatch):

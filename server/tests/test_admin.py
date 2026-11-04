@@ -438,6 +438,7 @@ def test_device_live_view_shows_frame_keypoints_and_detection(family):
         kp = body["keypoints"]
         assert kp["bbox"] == [290, 150, 350, 450] and kp["shoulders"] == [[305, 200], [335, 200]]
         assert kp["hips"] == [[310, 300], [330, 300]] and len(kp["points"]) == 4 and kp["confidence"] == 1
+        assert kp["skeleton"] is None               # 가짜 추정기는 17점을 모르므로 뼈대 선이 없다
         assert body["features"]["torso_angle"] == 0 and body["features"]["aspect_ratio"] == 0.2
         assert body["posture"] == "standing" and body["fsm"]["state"] == "NORMAL" and body["state"] == "NORMAL"
         assert body["event_state"] is None and body["fsm"]["lying_for"] is None
